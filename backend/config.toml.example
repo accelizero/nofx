@@ -1,0 +1,149 @@
+# AI交易系统配置文件
+# 支持TOML格式，每个配置项都有详细注释
+
+# ============================================================================
+# 币种池配置
+# ============================================================================
+# 是否使用默认主流币种列表
+use_default_coins = true
+
+# 默认主流币种池（当use_default_coins为true时使用）
+default_coins = ["BTCUSDT"]
+
+# ============================================================================
+# Trader配置（交易机器人列表）
+# ============================================================================
+# 风险控制配置
+# ============================================================================
+# 最大日亏损百分比（账户级别风控）
+max_daily_loss = 20.0
+
+# 最大回撤百分比（账户级别风控）
+max_drawdown = 20.0
+
+# 触发风控后暂停时长（分钟）
+stop_trading_minutes = 60
+
+# 单仓位止损百分比（默认10%）
+position_stop_loss_pct = 20.0
+
+# 单仓位止盈百分比（可选，>0时强制止盈，≤0时由AI自行判断）
+position_take_profit_pct = 100.0
+
+# 是否跳过流动性检查（默认false，开启后可以交易流动性差的币种）
+skip_liquidity_check = true
+
+# ============================================================================
+[[traders]]
+  # Trader唯一标识（用于日志目录等）
+  id = "aster_deepseek"
+  
+  # Trader显示名称
+  name = "DeepSeek-Trader"
+  
+  # 是否启用该trader
+  enabled = true
+  
+  # AI模型选择: "qwen" 或 "deepseek" 或 "custom"
+  ai_model = "deepseek"
+  
+  # 交易平台选择（当前仅支持 "aster"）
+  exchange = "aster"
+  
+  # Aster配置
+  # Aster主钱包地址
+  aster_user = "0x"
+  # Aster API钱包地址
+  aster_signer = "0x"
+  # Aster API钱包私钥
+  aster_private_key = "0x"
+  
+  # DeepSeek API密钥（当ai_model为"deepseek"时需要）
+  deepseek_key = "sk-"
+  
+  # 初始余额（USDT）
+  initial_balance = 1000
+  
+  # 扫描间隔（分钟）
+  scan_interval_minutes = 3
+
+# ============================================================================
+# 杠杆配置
+# ============================================================================
+[leverage]
+  # BTC和ETH的杠杆倍数（主账户建议5-50，子账户≤5）
+  btc_eth_leverage = 20
+  # 山寨币的杠杆倍数（主账户建议5-20，子账户≤5）
+  altcoin_leverage = 5
+
+# ============================================================================
+# API服务器配置
+# ============================================================================
+# API服务器端口
+api_server_port = 8080
+
+# API服务器详细配置
+[api_server_config]
+  # 允许的CORS来源（空数组表示允许所有来源，生产环境应配置具体域名）
+  allowed_origins = []
+  # 是否启用API请求限流（默认true）
+  enable_rate_limit = true
+  # 每个IP每秒允许的请求数（默认100）
+  rate_limit_rps = 100
+
+# ============================================================================
+# 交易策略配置
+# ============================================================================
+[strategy]
+  # 策略名称（对应strategies文件夹下的策略文件夹名）
+  # 当前可用策略: "sharpe_ratio"
+  name = "sharpe_ratio"
+  
+  # 策略偏好（可选，用于策略的个性化定制）
+  # 这个字段会被传递给策略提示词，可以根据需要添加任何偏好设置
+  preference = "aggressive"  # 可选值: "conservative", "aggressive", "balanced"
+
+# ============================================================================
+# 分析模式配置
+# ============================================================================
+[analysis_mode]
+  # 分析模式: "standard" 或 "multi_timeframe"，默认"standard"
+  mode = "multi_timeframe"
+  
+  # 多时间框架分析配置（仅在mode="multi_timeframe"时生效）
+  [analysis_mode.multi_timeframe]
+    # 时间框架权重（总和应为1.0）
+    [analysis_mode.multi_timeframe.weights]
+      # 日线权重（默认0.4）
+      daily = 0.4
+      # 4小时权重（默认0.3）
+      hourly4 = 0.3
+      # 1小时权重（默认0.2）
+      hourly1 = 0.2
+      # 15分钟权重（默认0.1）
+      minute15 = 0.1
+    
+    # 最低一致性评分（默认0.5）
+    min_consistency_score = 0.5
+    
+    # 是否启用缓存（默认true）
+    enable_cache = true
+    
+    # 缓存TTL（秒）
+    [analysis_mode.multi_timeframe.cache_ttl]
+      # 日线数据TTL（默认3600秒=1小时）
+      daily = 3600
+      # 4小时数据TTL（默认900秒=15分钟）
+      hourly4 = 900
+      # 1小时数据TTL（默认300秒=5分钟）
+      hourly1 = 300
+      # 15分钟数据TTL（默认60秒=1分钟）
+      minute15 = 60
+    
+    # 回调入场策略配置（"顺大逆小"策略）
+    [analysis_mode.multi_timeframe.pullback_entry]
+      # 是否启用回调入场策略（默认true）
+      enable = true
+      # 回调入场加分（默认0.15，范围0-0.3）
+      bonus_score = 0.15
+
