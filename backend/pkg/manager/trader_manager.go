@@ -59,7 +59,6 @@ func (tm *TraderManager) AddTrader(cfg config.TraderConfig, maxDailyLoss, maxDra
 		AnalysisMode:           analysisMode.Mode, // 分析模式
 		MultiTimeframeConfig:  analysisMode.MultiTimeframe, // 多时间框架配置
 		StrategyName:           strategy.Name, // 策略名称
-		StrategyPreference:    strategy.Preference, // 策略偏好
 	}
 
 	// 创建trader实例

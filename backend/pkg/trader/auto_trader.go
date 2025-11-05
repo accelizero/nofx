@@ -69,8 +69,7 @@ type AutoTraderConfig struct {
 	MultiTimeframeConfig *config.MultiTimeframeConfig // 多时间框架配置（仅在mode="multi_timeframe"时有效）
 	
 	// 策略配置
-	StrategyName       string // 策略名称（从配置读取）
-	StrategyPreference string // 策略偏好（从配置读取）
+	StrategyName string // 策略名称（从配置读取）
 }
 
 // AutoTrader 自动交易器
@@ -653,8 +652,64 @@ func (at *AutoTrader) runCycle() error {
 					Success:   true,
 				}
 				
+				// 获取平仓逻辑：优先从决策记录中查找，然后从PositionLogicManager获取开仓时保存的exit_reasoning
+				closeReason := ""
+				
+				// 1. 尝试从决策记录中查找对应的平仓决策（查找最近5分钟内的决策）
+				if at.storageAdapter != nil {
+					decisionStorage := at.storageAdapter.GetDecisionStorage()
+					if decisionStorage != nil {
+						records, err := decisionStorage.GetLatestRecords(at.id, 50)
+						if err == nil {
+							timeWindow := 5 * time.Minute
+							now := time.Now()
+							for _, record := range records {
+								// 检查时间是否接近（允许±5分钟误差）
+								timeDiff := record.Timestamp.Sub(now)
+								if timeDiff < 0 {
+									timeDiff = -timeDiff
+								}
+								if timeDiff > timeWindow {
+									continue
+								}
+								
+								// 解析decisions字段
+								var decisions []decision.Decision
+								if err := json.Unmarshal(record.Decisions, &decisions); err != nil {
+									continue
+								}
+								
+								// 查找匹配的平仓决策
+								closeActionStr := fmt.Sprintf("close_%s", side)
+								for _, dec := range decisions {
+									if dec.Action == closeActionStr && dec.Symbol == symbol && dec.Reasoning != "" {
+										closeReason = dec.Reasoning
+										break
+									}
+								}
+								if closeReason != "" {
+									break
+								}
+							}
+						}
+					}
+				}
+				
+				// 2. 如果从决策记录中找不到，尝试从PositionLogicManager获取开仓时保存的exit_reasoning
+				if closeReason == "" && at.positionLogicManager != nil {
+					logic := at.positionLogicManager.GetLogic(symbol, side)
+					if logic != nil && logic.ExitLogic != nil && logic.ExitLogic.Reasoning != "" {
+						closeReason = logic.ExitLogic.Reasoning
+					}
+				}
+				
+				// 3. 如果都没有，使用"手动平仓"作为默认值
+				if closeReason == "" {
+					closeReason = "手动平仓"
+				}
+				
 				// 构建交易记录
-				trade := at.buildTradeRecord(symbol, side, openAction, closeAction, 0, atomic.LoadInt64(&at.callCount), false, "", "系统外开仓", "手动平仓")
+				trade := at.buildTradeRecord(symbol, side, openAction, closeAction, 0, atomic.LoadInt64(&at.callCount), false, "", "系统外开仓", closeReason)
 				
 				// 保存交易历史到数据库
 				if at.storageAdapter != nil {
@@ -1041,7 +1096,6 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 					MultiTimeframeConfig: at.config.MultiTimeframeConfig,
 					MarketDataMap:        make(map[string]*market.Data),
 					StrategyName:         at.config.StrategyName,
-					StrategyPreference:   at.config.StrategyPreference,
 				}
 				// 将市场数据放入上下文，以便逻辑检查可以访问
 				ctx.MarketDataMap[symbol] = marketData
@@ -1185,7 +1239,6 @@ func (at *AutoTrader) buildTradingContext() (*decision.Context, error) {
 		AnalysisMode:    at.config.AnalysisMode, // 分析模式
 		MultiTimeframeConfig: at.config.MultiTimeframeConfig, // 多时间框架配置
 		StrategyName:    at.config.StrategyName, // 策略名称
-		StrategyPreference: at.config.StrategyPreference, // 策略偏好
 	}
 
 	return ctx, nil
@@ -2150,6 +2203,15 @@ func (at *AutoTrader) executeCloseLongWithRecord(dec *decision.Decision, actionR
 	delete(at.positionFirstSeenTime, posKeyForTime)
 	at.positionTimeMu.Unlock()
 
+	// 在删除逻辑之前，先获取开仓时保存的exit_reasoning（用于记录交易历史）
+	var savedExitReasoning string
+	if at.positionLogicManager != nil {
+		logic := at.positionLogicManager.GetLogic(dec.Symbol, "long")
+		if logic != nil && logic.ExitLogic != nil && logic.ExitLogic.Reasoning != "" {
+			savedExitReasoning = logic.ExitLogic.Reasoning
+		}
+	}
+
 	// 记录交易历史（从持仓信息中获取开仓信息）
 	// 保存出场逻辑（如果提供）
 	if dec.Reasoning != "" {
@@ -2173,6 +2235,11 @@ func (at *AutoTrader) executeCloseLongWithRecord(dec *decision.Decision, actionR
 		log.Printf("  ⚠ 删除持仓逻辑失败: %v", err)
 	} else {
 		log.Printf("  ✓ 已删除持仓逻辑（包含止损/止盈价格）")
+	}
+
+	// 如果平仓时没有提供reasoning，使用保存的exit_reasoning
+	if dec.Reasoning == "" && savedExitReasoning != "" {
+		dec.Reasoning = savedExitReasoning
 	}
 
 	at.recordTradeHistory("long", dec, actionRecord, false, "")
@@ -2260,6 +2327,15 @@ func (at *AutoTrader) executeCloseShortWithRecord(dec *decision.Decision, action
 	delete(at.positionFirstSeenTime, posKeyForTime)
 	at.positionTimeMu.Unlock()
 
+	// 在删除逻辑之前，先获取开仓时保存的exit_reasoning（用于记录交易历史）
+	var savedExitReasoning string
+	if at.positionLogicManager != nil {
+		logic := at.positionLogicManager.GetLogic(dec.Symbol, "short")
+		if logic != nil && logic.ExitLogic != nil && logic.ExitLogic.Reasoning != "" {
+			savedExitReasoning = logic.ExitLogic.Reasoning
+		}
+	}
+
 	// 保存出场逻辑（如果提供，在删除逻辑之前保存）
 	if dec.Reasoning != "" {
 		ctx := &decision.Context{
@@ -2282,6 +2358,11 @@ func (at *AutoTrader) executeCloseShortWithRecord(dec *decision.Decision, action
 		log.Printf("  ⚠ 删除持仓逻辑失败: %v", err)
 	} else {
 		log.Printf("  ✓ 已删除持仓逻辑（包含止损/止盈价格）")
+	}
+
+	// 如果平仓时没有提供reasoning，使用保存的exit_reasoning
+	if dec.Reasoning == "" && savedExitReasoning != "" {
+		dec.Reasoning = savedExitReasoning
 	}
 
 	// 记录交易历史（从持仓信息中获取开仓信息）
@@ -2933,8 +3014,26 @@ func (at *AutoTrader) recordTradeHistory(side string, decision *decision.Decisio
 		return
 	}
 
+	// 获取平仓逻辑：优先使用平仓时的reasoning，如果没有则尝试从PositionLogicManager获取开仓时保存的exit_reasoning
+	closeReason := decision.Reasoning
+	if closeReason == "" && at.positionLogicManager != nil {
+		logic := at.positionLogicManager.GetLogic(decision.Symbol, side)
+		if logic != nil && logic.ExitLogic != nil {
+			// 从ExitLogic中提取文本描述
+			if logic.ExitLogic.Reasoning != "" {
+				closeReason = logic.ExitLogic.Reasoning
+			} else if len(logic.ExitLogic.Conditions) > 0 {
+				// 如果有条件但没有reasoning，尝试从条件中构建描述
+				closeReason = "根据开仓时规划的出场逻辑"
+			}
+		}
+	}
+	if closeReason == "" {
+		closeReason = "未提供平仓逻辑"
+	}
+
 	// 构建交易记录
-	trade := at.buildTradeRecord(decision.Symbol, side, openAction, closeAction, openCycleNum, atomic.LoadInt64(&at.callCount), isForced, forcedReason, decision.Reasoning, decision.Reasoning)
+	trade := at.buildTradeRecord(decision.Symbol, side, openAction, closeAction, openCycleNum, atomic.LoadInt64(&at.callCount), isForced, forcedReason, decision.Reasoning, closeReason)
 	
 	// 保存交易历史到数据库
 	if at.storageAdapter != nil {
@@ -3608,7 +3707,6 @@ func (at *AutoTrader) GetPositions() ([]map[string]interface{}, error) {
 					MultiTimeframeConfig: at.config.MultiTimeframeConfig,
 					MarketDataMap:        make(map[string]*market.Data),
 					StrategyName:         at.config.StrategyName,
-					StrategyPreference:   at.config.StrategyPreference,
 				}
 				ctx.MarketDataMap[symbol] = marketData
 				logicInvalid, invalidReasons = decision.CheckLogicValidity(logic, symbol, marketData, ctx, side)
@@ -4111,6 +4209,62 @@ func (at *AutoTrader) SyncManualTradesFromExchange() error {
 			pnlPct = (calculatedPnL / marginUsed) * 100
 		}
 		
+		// 获取平仓逻辑：优先从决策记录中查找，然后从PositionLogicManager获取开仓时保存的exit_reasoning
+		closeReason := ""
+		
+		// 1. 尝试从决策记录中查找对应的平仓决策
+		if at.storageAdapter != nil {
+			decisionStorage := at.storageAdapter.GetDecisionStorage()
+			if decisionStorage != nil {
+				records, err := decisionStorage.GetLatestRecords(at.id, 100)
+				if err == nil {
+					// 查找平仓时间接近的决策记录（允许±5分钟误差）
+					timeWindow := 5 * time.Minute
+					for _, record := range records {
+						// 检查时间是否接近平仓时间
+						timeDiff := record.Timestamp.Sub(agg.lastTime)
+						if timeDiff < 0 {
+							timeDiff = -timeDiff
+						}
+						if timeDiff > timeWindow {
+							continue
+						}
+						
+						// 解析decisions字段
+						var decisions []decision.Decision
+						if err := json.Unmarshal(record.Decisions, &decisions); err != nil {
+							continue
+						}
+						
+						// 查找匹配的平仓决策
+						closeAction := fmt.Sprintf("close_%s", agg.tradeSide)
+						for _, dec := range decisions {
+							if dec.Action == closeAction && dec.Symbol == agg.symbol && dec.Reasoning != "" {
+								closeReason = dec.Reasoning
+								break
+							}
+						}
+						if closeReason != "" {
+							break
+						}
+					}
+				}
+			}
+		}
+		
+		// 2. 如果从决策记录中找不到，尝试从PositionLogicManager获取开仓时保存的exit_reasoning
+		if closeReason == "" && at.positionLogicManager != nil {
+			logic := at.positionLogicManager.GetLogic(agg.symbol, agg.tradeSide)
+			if logic != nil && logic.ExitLogic != nil && logic.ExitLogic.Reasoning != "" {
+				closeReason = logic.ExitLogic.Reasoning
+			}
+		}
+		
+		// 3. 如果都没有，使用"手动平仓"作为默认值
+		if closeReason == "" {
+			closeReason = "手动平仓"
+		}
+		
 		// 创建完整的交易记录（使用聚合后的数据）
 		tradeRecord := &storage.TradeRecord{
 			TradeID:        tradeId,
@@ -4127,7 +4281,7 @@ func (at *AutoTrader) SyncManualTradesFromExchange() error {
 			ClosePrice:     agg.weightedPrice, // 使用加权平均价格
 			CloseQuantity:  agg.totalQty, // 使用总数量
 			CloseOrderID:   agg.orderId,
-			CloseReason:    "手动平仓",
+			CloseReason:    closeReason,
 			CloseCycleNum:  int(atomic.LoadInt64(&at.callCount)),
 			IsForced:       false,
 			ForcedReason:   "",

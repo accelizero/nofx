@@ -127,6 +127,7 @@ type TradeOutcome struct {
 	OpenTime      time.Time `json:"open_time"`       // 开仓时间
 	CloseTime     time.Time `json:"close_time"`      // 平仓时间
 	WasStopLoss   bool      `json:"was_stop_loss"`   // 是否止损
+	CloseReason   string    `json:"close_reason"`   // 平仓原因（平仓逻辑）
 }
 
 // PerformanceAnalysis 交易表现分析

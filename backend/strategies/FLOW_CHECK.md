@@ -8,22 +8,20 @@
 ```
 config.toml [strategy] 
   → config.Config.Strategy 
-  → AutoTraderConfig.StrategyName/StrategyPreference 
-  → decision.Context.StrategyName/StrategyPreference 
+  → AutoTraderConfig.StrategyName 
+  → decision.Context.StrategyName 
   → buildSystemPrompt() 
   → LoadStrategyPrompt() 
-  → 加载 base_prompt.txt + {strategy_name}/strategy_prompt.txt
+  → 加载 {strategy_name}.txt
 ```
 
 **代码位置**：
-- `backend/pkg/decision/engine.go:118` - `buildSystemPrompt(ctx.StrategyName, ctx.StrategyPreference)`
-- `backend/pkg/decision/strategy.go:13` - `LoadStrategyPrompt(strategyName, preference)`
+- `backend/pkg/decision/engine.go:118` - `buildSystemPrompt(ctx.StrategyName)`
+- `backend/pkg/decision/strategy.go:13` - `LoadStrategyPrompt(strategyName)`
 - `backend/pkg/decision/engine.go:285` - 加载策略文件
 
 **包含内容**：
-- ✅ base_prompt.txt - 基础规则、风险控制、输出格式
-- ✅ strategy_prompt.txt - 策略特定目标和方法
-- ✅ 策略偏好说明（conservative/aggressive/balanced）
+- ✅ {strategy_name}.txt - 完整的策略提示词（包含所有规则、风险控制、输出格式等）
 - ✅ 动态仓位配置（根据账户状态生成）
 
 ### 2. 获取市场数据（K线、技术指标）
@@ -148,7 +146,7 @@ GetFullDecision()
 
 **所有数据都已正确组合并发送给AI**：
 
-1. ✅ **策略提示词** - 从文件动态加载（base + strategy + preference）
+1. ✅ **策略提示词** - 从文件动态加载（base + strategy）
 2. ✅ **代码逻辑** - 硬约束、风险控制规则（在base_prompt.txt中）
 3. ✅ **K线数据** - 多时间框架（日/4h/1h/15m）完整序列
 4. ✅ **市场数据** - 价格、EMA、MACD、RSI、成交量、持仓量、资金费率、ATR
@@ -165,8 +163,8 @@ GetFullDecision()
 AutoTraderConfig
   ↓
 Context (决策上下文)
-  ├─ StrategyName/StrategyPreference → buildSystemPrompt()
-  │   └─ LoadStrategyPrompt() → base_prompt.txt + strategy_prompt.txt
+  ├─ StrategyName → buildSystemPrompt()
+  │   └─ LoadStrategyPrompt() → {strategy_name}.txt
   │
   ├─ Positions → buildMultiTimeframePrompt()
   ├─ CandidateCoins → buildMultiTimeframePrompt()

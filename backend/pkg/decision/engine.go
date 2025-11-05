@@ -66,8 +66,7 @@ type Context struct {
 	SkipLiquidityCheck  bool                    `json:"-"` // 是否跳过流动性检查（从配置读取）
 	AnalysisMode       string                  `json:"-"` // 分析模式（固定为"multi_timeframe"）
 	MultiTimeframeConfig *config.MultiTimeframeConfig `json:"-"` // 多时间框架配置
-	StrategyName       string                  `json:"-"` // 策略名称（从配置读取）
-	StrategyPreference string                  `json:"-"` // 策略偏好（从配置读取）
+	StrategyName string `json:"-"` // 策略名称（从配置读取）
 }
 
 // Decision AI的交易决策
@@ -116,7 +115,7 @@ func GetFullDecision(ctx *Context, mcpClient *mcp.Client) (*FullDecision, error)
 		}
 		return len(symbolSet) == 1
 	}()
-	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, isSingleSymbol, ctx.StrategyName, ctx.StrategyPreference)
+	systemPrompt := buildSystemPrompt(ctx.Account.TotalEquity, ctx.BTCETHLeverage, ctx.AltcoinLeverage, isSingleSymbol, ctx.StrategyName)
 
 	// 4. 调用AI API（使用 system + user prompt）
 	aiResponse, err := mcpClient.CallWithMessages(systemPrompt, userPrompt)
@@ -281,16 +280,16 @@ func calculateMaxCandidates(ctx *Context) int {
 }
 
 // buildSystemPrompt 构建 System Prompt（固定规则，可缓存）
-func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int, isSingleSymbol bool, strategyName, preference string) string {
+func buildSystemPrompt(accountEquity float64, btcEthLeverage, altcoinLeverage int, isSingleSymbol bool, strategyName string) string {
 	// 验证策略名称
 	if strategyName == "" {
-		log.Printf("⚠️  策略名称为空，使用默认策略 'sharpe_ratio'")
-		strategyName = "sharpe_ratio"
+		log.Printf("⚠️  策略名称为空，使用默认策略 'base_prompt'")
+		strategyName = "base_prompt"
 	}
 	
 	// 加载策略提示词
-	log.Printf("📋 加载策略提示词: 策略='%s', 偏好='%s'", strategyName, preference)
-	strategyPrompt, err := LoadStrategyPrompt(strategyName, preference)
+	log.Printf("📋 加载策略提示词: 策略='%s'", strategyName)
+	strategyPrompt, err := LoadStrategyPrompt(strategyName)
 	if err != nil {
 		log.Printf("⚠️  加载策略提示词失败，使用默认提示词: %v", err)
 		// 如果加载失败，使用默认提示词（保持向后兼容）
@@ -585,14 +584,80 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 				sb.WriteString("\n")
 			}
 			
-			// 策略建议应该从策略文件（strategy_prompt.txt）中读取，而不是硬编码
+			// 3. 最近交易记录（只显示候选币种的最新一条）
+			if len(perf.RecentTrades) > 0 && len(ctx.CandidateCoins) > 0 {
+				// 构建候选币种集合
+				candidateSymbols := make(map[string]bool)
+				for _, coin := range ctx.CandidateCoins {
+					candidateSymbols[coin.Symbol] = true
+				}
+				
+				// 为每个候选币种找到最新的一条交易记录
+				latestTradeBySymbol := make(map[string]logger.TradeOutcome)
+				for _, trade := range perf.RecentTrades {
+					if candidateSymbols[trade.Symbol] {
+						// 如果该币种还没有记录，或者当前交易更新，则更新
+						existing, exists := latestTradeBySymbol[trade.Symbol]
+						if !exists || trade.CloseTime.After(existing.CloseTime) {
+							latestTradeBySymbol[trade.Symbol] = trade
+						}
+					}
+				}
+				
+				// 按平仓时间排序（最新的在前）
+				type TradeWithSymbol struct {
+					Symbol string
+					Trade  logger.TradeOutcome
+				}
+				var sortedTrades []TradeWithSymbol
+				for symbol, trade := range latestTradeBySymbol {
+					sortedTrades = append(sortedTrades, TradeWithSymbol{Symbol: symbol, Trade: trade})
+				}
+				
+				// 按CloseTime降序排序
+				for i := 0; i < len(sortedTrades)-1; i++ {
+					for j := i + 1; j < len(sortedTrades); j++ {
+						if sortedTrades[i].Trade.CloseTime.Before(sortedTrades[j].Trade.CloseTime) {
+							sortedTrades[i], sortedTrades[j] = sortedTrades[j], sortedTrades[i]
+						}
+					}
+				}
+				
+				if len(sortedTrades) > 0 {
+					sb.WriteString("### 📝 最近交易记录（每个币种最新一条）\n\n")
+					for i, item := range sortedTrades {
+						trade := item.Trade
+						pnlSign := "+"
+						if trade.PnL < 0 {
+							pnlSign = ""
+						}
+						stopLossMark := ""
+						if trade.WasStopLoss {
+							stopLossMark = " 🛑"
+						}
+						closeTimeStr := trade.CloseTime.Format("2006-01-02 15:04:05")
+						
+						// 平仓逻辑（如果有）
+						closeLogic := ""
+						if trade.CloseReason != "" {
+							closeLogic = fmt.Sprintf(" | 平仓逻辑: %s", trade.CloseReason)
+						}
+						
+						sb.WriteString(fmt.Sprintf("%d. **%s** %s | 开仓: %.2f → 平仓: %.2f | 盈亏: %s%.2f USDT (%.2f%%) | 杠杆: %dx | 时长: %s | 平仓时间: %s%s%s\n",
+							i+1, trade.Symbol, trade.Side, trade.OpenPrice, trade.ClosePrice,
+							pnlSign, trade.PnL, trade.PnLPct, trade.Leverage, trade.Duration, closeTimeStr, stopLossMark, closeLogic))
+					}
+					sb.WriteString("\n")
+				}
+			}
+			
+			// 策略建议应该从策略文件中读取，而不是硬编码
 			// 这里只显示当前夏普比率，让AI根据策略文件中的指导自行判断
 			sb.WriteString("### 🎯 当前表现指标\n\n")
 			sb.WriteString(fmt.Sprintf("**当前夏普比率**: %.2f\n\n", perf.SharpeRatio))
-			sb.WriteString("**请根据策略文件中的指导原则，结合当前夏普比率做出决策**。\n\n")
 			
-			log.Printf("📚 已添加AI学习数据: 总交易数=%d, 胜率=%.1f%%, 夏普比率=%.2f", 
-				perf.TotalTrades, perf.WinRate, perf.SharpeRatio)
+			log.Printf("📚 已添加AI学习数据: 总交易数=%d, 胜率=%.1f%%, 夏普比率=%.2f, 最近交易记录=%d条", 
+				perf.TotalTrades, perf.WinRate, perf.SharpeRatio, len(perf.RecentTrades))
 		} else {
 			// 方法2: 通过JSON解析（兼容性方案）
 			type PerformanceData struct {
@@ -619,7 +684,75 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 					if perfData.WorstSymbol != "" {
 						sb.WriteString(fmt.Sprintf("**表现最差**: %s\n", perfData.WorstSymbol))
 					}
-					log.Printf("📊 通过JSON解析获取Performance数据")
+					
+					// 最近交易记录（只显示候选币种的最新一条）
+					if len(perfData.RecentTrades) > 0 && len(ctx.CandidateCoins) > 0 {
+						// 构建候选币种集合
+						candidateSymbols := make(map[string]bool)
+						for _, coin := range ctx.CandidateCoins {
+							candidateSymbols[coin.Symbol] = true
+						}
+						
+						// 为每个候选币种找到最新的一条交易记录
+						latestTradeBySymbol := make(map[string]logger.TradeOutcome)
+						for _, trade := range perfData.RecentTrades {
+							if candidateSymbols[trade.Symbol] {
+								// 如果该币种还没有记录，或者当前交易更新，则更新
+								existing, exists := latestTradeBySymbol[trade.Symbol]
+								if !exists || trade.CloseTime.After(existing.CloseTime) {
+									latestTradeBySymbol[trade.Symbol] = trade
+								}
+							}
+						}
+						
+						// 按平仓时间排序（最新的在前）
+						type TradeWithSymbol struct {
+							Symbol string
+							Trade  logger.TradeOutcome
+						}
+						var sortedTrades []TradeWithSymbol
+						for symbol, trade := range latestTradeBySymbol {
+							sortedTrades = append(sortedTrades, TradeWithSymbol{Symbol: symbol, Trade: trade})
+						}
+						
+						// 按CloseTime降序排序
+						for i := 0; i < len(sortedTrades)-1; i++ {
+							for j := i + 1; j < len(sortedTrades); j++ {
+								if sortedTrades[i].Trade.CloseTime.Before(sortedTrades[j].Trade.CloseTime) {
+									sortedTrades[i], sortedTrades[j] = sortedTrades[j], sortedTrades[i]
+								}
+							}
+						}
+						
+						if len(sortedTrades) > 0 {
+							sb.WriteString("\n### 📝 候选币种最近交易记录（每个币种最新一条）\n\n")
+							for i, item := range sortedTrades {
+								trade := item.Trade
+								pnlSign := "+"
+								if trade.PnL < 0 {
+									pnlSign = ""
+								}
+								stopLossMark := ""
+								if trade.WasStopLoss {
+									stopLossMark = " 🛑"
+								}
+								closeTimeStr := trade.CloseTime.Format("2006-01-02 15:04:05")
+								
+								// 平仓逻辑（如果有）
+								closeLogic := ""
+								if trade.CloseReason != "" {
+									closeLogic = fmt.Sprintf(" | 平仓逻辑: %s", trade.CloseReason)
+								}
+								
+								sb.WriteString(fmt.Sprintf("%d. **%s** %s | 开仓: %.2f → 平仓: %.2f | 盈亏: %s%.2f USDT (%.2f%%) | 杠杆: %dx | 时长: %s | 平仓时间: %s%s%s\n",
+									i+1, trade.Symbol, trade.Side, trade.OpenPrice, trade.ClosePrice,
+									pnlSign, trade.PnL, trade.PnLPct, trade.Leverage, trade.Duration, closeTimeStr, stopLossMark, closeLogic))
+							}
+							sb.WriteString("\n")
+						}
+					}
+					
+					log.Printf("📊 通过JSON解析获取Performance数据，最近交易记录=%d条", len(perfData.RecentTrades))
 				} else {
 					log.Printf("⚠️  JSON解析Performance失败: %v", err)
 				}

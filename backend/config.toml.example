@@ -95,13 +95,9 @@ api_server_port = 8080
 # 交易策略配置
 # ============================================================================
 [strategy]
-  # 策略名称（对应strategies文件夹下的策略文件夹名）
-  # 当前可用策略: "sharpe_ratio"
-  name = "sharpe_ratio"
-  
-  # 策略偏好（可选，用于策略的个性化定制）
-  # 这个字段会被传递给策略提示词，可以根据需要添加任何偏好设置
-  preference = "aggressive"  # 可选值: "conservative", "aggressive", "balanced"
+  # 策略名称（对应strategies文件夹下的文件名，不含.txt扩展名）
+  # 例如: "base_prompt" 对应 strategies/base_prompt.txt
+  name = "base_prompt"
 
 # ============================================================================
 # 分析模式配置

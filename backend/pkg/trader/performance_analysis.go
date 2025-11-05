@@ -140,6 +140,7 @@ func (at *AutoTrader) analyzePerformanceFromDB(records []*storage.DecisionRecord
 					OpenTime:      openTime,
 					CloseTime:     action.Timestamp,
 					WasStopLoss:   action.IsForced && pnl < 0,
+					CloseReason:   "", // 从DecisionRecord构建时，CloseReason需要从其他地方获取
 				}
 
 				analysis.RecentTrades = append(analysis.RecentTrades, outcome)
@@ -270,6 +271,7 @@ func (at *AutoTrader) analyzePerformanceFromTrades(trades []*storage.TradeRecord
 			OpenTime:      trade.OpenTime,
 			CloseTime:     trade.CloseTime,
 			WasStopLoss:   trade.WasStopLoss,
+			CloseReason:   trade.CloseReason, // 平仓原因（平仓逻辑）
 		}
 
 		analysis.RecentTrades = append(analysis.RecentTrades, outcome)

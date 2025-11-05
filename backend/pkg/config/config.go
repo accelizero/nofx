@@ -111,8 +111,7 @@ type Config struct {
 
 // StrategyConfig 交易策略配置
 type StrategyConfig struct {
-	Name       string `toml:"name"`        // 策略名称（对应strategies文件夹下的策略文件夹名）
-	Preference string `toml:"preference"` // 策略偏好（可选，用于策略的个性化定制）
+	Name string `toml:"name"` // 策略名称（对应strategies文件夹下的文件名，不含.txt扩展名）
 }
 
 // APIServerConfig API服务器配置
@@ -161,10 +160,7 @@ func LoadConfig(filename string) (*Config, error) {
 
 	// 设置策略默认配置
 	if config.Strategy.Name == "" {
-		config.Strategy.Name = "sharpe_ratio" // 默认使用夏普比率策略
-	}
-	if config.Strategy.Preference == "" {
-		config.Strategy.Preference = "balanced" // 默认平衡偏好
+		config.Strategy.Name = "base_prompt" // 默认使用基础提示词
 	}
 	
 	// 设置API服务器默认配置
