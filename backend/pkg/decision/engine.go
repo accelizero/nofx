@@ -492,11 +492,11 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 		sb.WriteString("**多时间框架数据**:\n\n")
 		
 		// 日线数据（完整序列）
-		if data.DailyData != nil {
-			sb.WriteString("**日线 (1d) 数据**:\n")
-			sb.WriteString(formatMarketDataForMultiTimeframe(data.DailyData))
-			sb.WriteString("\n")
-		}
+		// if data.DailyData != nil {
+		// 	sb.WriteString("**日线 (1d) 数据**:\n")
+		// 	sb.WriteString(formatMarketDataForMultiTimeframe(data.DailyData))
+		// 	sb.WriteString("\n")
+		// }
 		
 		// 4小时数据（完整序列）
 		if data.Hourly4Data != nil {
