@@ -218,12 +218,17 @@ func (s *TradeStorage) LogTrade(trade *TradeRecord) error {
 
 // CreateOrUpdateTrade 创建或更新交易记录（建仓时创建，后续操作更新）
 // 如果记录不存在则创建，存在则更新
+// 改进：使用时间范围查询检查记录是否存在，避免精确匹配失败
 func (s *TradeStorage) CreateOrUpdateTrade(trade *TradeRecord) error {
-	// 检查记录是否存在
+	// 检查记录是否存在（使用时间范围查询，避免精确匹配失败）
+	// 使用 ±10秒 的时间范围，与 GetOpenTradeByTime 保持一致
+	startTime := trade.OpenTime.Add(-10 * time.Second)
+	endTime := trade.OpenTime.Add(10 * time.Second)
+	
 	var exists bool
 	err := s.db.QueryRow(
-		"SELECT EXISTS(SELECT 1 FROM trades WHERE symbol = ? AND open_time = ?)",
-		trade.Symbol, trade.OpenTime,
+		"SELECT EXISTS(SELECT 1 FROM trades WHERE symbol = ? AND open_time >= ? AND open_time <= ?)",
+		trade.Symbol, startTime, endTime,
 	).Scan(&exists)
 	if err != nil {
 		return fmt.Errorf("检查交易记录是否存在失败: %w", err)
@@ -231,6 +236,7 @@ func (s *TradeStorage) CreateOrUpdateTrade(trade *TradeRecord) error {
 
 	if exists {
 		// 更新现有记录
+		// 注意：如果记录存在但UpdateTrade失败，会返回错误，调用方需要处理
 		return s.UpdateTrade(trade)
 	} else {
 		// 创建新记录
@@ -332,9 +338,19 @@ func (s *TradeStorage) UpdateTrade(trade *TradeRecord) error {
 	)
 	args = append(args, trade.Symbol, trade.OpenTime)
 
-	_, err := s.db.Exec(query, args...)
+	result, err := s.db.Exec(query, args...)
 	if err != nil {
 		return fmt.Errorf("更新交易记录失败: %w", err)
+	}
+
+	// 检查受影响的行数，如果为0说明记录不存在
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("获取更新影响行数失败: %w", err)
+	}
+
+	if rowsAffected == 0 {
+		return fmt.Errorf("交易记录不存在: symbol=%s, open_time=%s", trade.Symbol, trade.OpenTime.Format("2006-01-02 15:04:05"))
 	}
 
 	return nil
@@ -362,19 +378,42 @@ func (s *TradeStorage) GetOpenTrade(symbol, side string) (*TradeRecord, error) {
 }
 
 // GetOpenTradeByTime 根据开仓时间获取交易记录（使用时间范围查询，避免精确匹配失败）
+// 改进：增加side参数，提高匹配精度
 func (s *TradeStorage) GetOpenTradeByTime(symbol string, openTime time.Time) (*TradeRecord, error) {
+	return s.GetOpenTradeByTimeAndSide(symbol, "", openTime)
+}
+
+// GetOpenTradeByTimeAndSide 根据开仓时间和方向获取交易记录（使用时间范围查询，避免精确匹配失败）
+// 改进：增加side字段到查询条件，提高匹配精度，避免同一币种在短时间内多次开仓时匹配错误
+func (s *TradeStorage) GetOpenTradeByTimeAndSide(symbol, side string, openTime time.Time) (*TradeRecord, error) {
 	// 使用时间范围查询（前后10秒），避免精确匹配失败（交易所时间戳和数据库时间可能有微小差异）
 	startTime := openTime.Add(-10 * time.Second)
 	endTime := openTime.Add(10 * time.Second)
 	
-	query := `
-		SELECT * FROM trades
-		WHERE symbol = ? AND open_time >= ? AND open_time <= ?
-		ORDER BY ABS((julianday(open_time) - julianday(?)) * 86400) ASC
-		LIMIT 1
-	`
+	var query string
+	var args []interface{}
+	
+	if side != "" {
+		// 如果提供了side，使用side作为额外匹配条件，提高精度
+		query = `
+			SELECT * FROM trades
+			WHERE symbol = ? AND side = ? AND open_time >= ? AND open_time <= ?
+			ORDER BY ABS((julianday(open_time) - julianday(?)) * 86400) ASC
+			LIMIT 1
+		`
+		args = []interface{}{symbol, side, startTime, endTime, openTime}
+	} else {
+		// 如果没有提供side，使用原来的逻辑（向后兼容）
+		query = `
+			SELECT * FROM trades
+			WHERE symbol = ? AND open_time >= ? AND open_time <= ?
+			ORDER BY ABS((julianday(open_time) - julianday(?)) * 86400) ASC
+			LIMIT 1
+		`
+		args = []interface{}{symbol, startTime, endTime, openTime}
+	}
 
-	row := s.db.QueryRow(query, symbol, startTime, endTime, openTime)
+	row := s.db.QueryRow(query, args...)
 	trade, err := s.scanTrade(row)
 	if err == sql.ErrNoRows {
 		return nil, nil // 未找到记录

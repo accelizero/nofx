@@ -1419,8 +1419,11 @@ func (at *AutoTrader) checkPositionStopLossOnly() {
 				log.Printf("🛑 [每10秒检查] 触发单仓位强制止损: %s %s 亏损%.2f%% > %.2f%%，市价全平",
 					symbol, side, lossPct, positionStopLossPct)
 
-				// 执行强制平仓
-				action, err := at.forceClosePosition(symbol, side, fmt.Sprintf("单仓位亏损%.2f%%超过%.2f%%", lossPct, positionStopLossPct))
+				// 执行强制平仓，记录触发的止损百分比
+				// 格式：触发了X%的止损强制平仓（实际亏损Y%，止损阈值Z%）
+				forcedReason := fmt.Sprintf("触发了%.2f%%的止损强制平仓（实际亏损%.2f%%，止损阈值%.2f%%）", 
+					positionStopLossPct, lossPct, positionStopLossPct)
+				action, err := at.forceClosePosition(symbol, side, forcedReason)
 				if err != nil {
 					log.Printf("⚠️  强制平仓失败 (%s %s): %v", symbol, side, err)
 					// 失败时也记录到日志中
@@ -2630,10 +2633,21 @@ func (at *AutoTrader) executeUpdateTakeProfit(dec *decision.Decision, actionReco
 					UpdateTPLogic: dec.Reasoning,
 				}
 				if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
-					log.Printf("  ⚠ 更新交易记录的update_tp_logic失败: %v", err)
+					// 改进：如果更新失败（记录不存在），尝试创建记录
+					log.Printf("  ⚠ 更新交易记录的update_tp_logic失败: %v，尝试创建记录", err)
+					// 尝试使用CreateOrUpdateTrade（如果记录不存在会创建）
+					// 但这里我们只有部分字段，所以先检查记录是否存在
+					existing, _ := tradeStorage.GetOpenTradeByTimeAndSide(dec.Symbol, positionSide, openTime)
+					if existing == nil {
+						log.Printf("  ⚠ 交易记录不存在，无法更新update_tp_logic（这是正常的，如果交易记录尚未创建）")
+					} else {
+						log.Printf("  ⚠ 交易记录存在但更新失败，可能是数据库错误")
+					}
 				} else {
 					log.Printf("  ✓ 已更新交易记录的update_tp_logic")
 				}
+			} else {
+				log.Printf("  ⚠ 无法获取 %s %s 的开仓时间，跳过更新update_tp_logic", dec.Symbol, positionSide)
 			}
 		}
 	}
@@ -2917,10 +2931,21 @@ func (at *AutoTrader) executeUpdateStopLoss(dec *decision.Decision, actionRecord
 					UpdateSLLogic: dec.Reasoning,
 				}
 				if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
-					log.Printf("  ⚠ 更新交易记录的update_sl_logic失败: %v", err)
+					// 改进：如果更新失败（记录不存在），尝试创建记录
+					log.Printf("  ⚠ 更新交易记录的update_sl_logic失败: %v，尝试创建记录", err)
+					// 尝试使用CreateOrUpdateTrade（如果记录不存在会创建）
+					// 但这里我们只有部分字段，所以先检查记录是否存在
+					existing, _ := tradeStorage.GetOpenTradeByTimeAndSide(dec.Symbol, positionSide, openTime)
+					if existing == nil {
+						log.Printf("  ⚠ 交易记录不存在，无法更新update_sl_logic（这是正常的，如果交易记录尚未创建）")
+					} else {
+						log.Printf("  ⚠ 交易记录存在但更新失败，可能是数据库错误")
+					}
 				} else {
 					log.Printf("  ✓ 已更新交易记录的update_sl_logic")
 				}
+			} else {
+				log.Printf("  ⚠ 无法获取 %s %s 的开仓时间，跳过更新update_sl_logic", dec.Symbol, positionSide)
 			}
 		}
 	}
@@ -2929,13 +2954,20 @@ func (at *AutoTrader) executeUpdateStopLoss(dec *decision.Decision, actionRecord
 }
 
 // getOpenTimeForPosition 获取持仓的开仓时间
+// 改进：优先使用数据库作为唯一真实源，缓存只作为临时fallback
 func (at *AutoTrader) getOpenTimeForPosition(symbol, side string) time.Time {
-	// 方法1: 从已保存的交易记录中查找（优先查找未平仓交易）
+	// 方法1: 从已保存的交易记录中查找（优先使用数据库，这是唯一真实源）
 	if at.storageAdapter != nil {
 		tradeStorage := at.storageAdapter.GetTradeStorage()
 		if tradeStorage != nil {
+			// 优先查找未平仓交易
 			trade, err := tradeStorage.GetOpenTrade(symbol, side)
 			if err == nil && trade != nil {
+				// 找到记录，同时更新缓存（保持同步）
+				posKey := symbol + "_" + side
+				at.positionTimeMu.Lock()
+				at.positionFirstSeenTime[posKey] = trade.OpenTime.UnixMilli()
+				at.positionTimeMu.Unlock()
 				return trade.OpenTime
 			}
 			
@@ -2945,6 +2977,11 @@ func (at *AutoTrader) getOpenTimeForPosition(symbol, side string) time.Time {
 			if err == nil {
 				for _, t := range localTrades {
 					if t.Side == side {
+						// 找到记录，同时更新缓存（保持同步）
+						posKey := symbol + "_" + side
+						at.positionTimeMu.Lock()
+						at.positionFirstSeenTime[posKey] = t.OpenTime.UnixMilli()
+						at.positionTimeMu.Unlock()
 						// 返回最近一次交易的开仓时间（即使已平仓）
 						return t.OpenTime
 					}
@@ -2953,21 +2990,26 @@ func (at *AutoTrader) getOpenTimeForPosition(symbol, side string) time.Time {
 		}
 	}
 
-	// 方法2: 从positionFirstSeenTime获取
+	// 方法2: 从positionFirstSeenTime获取（仅作为临时fallback，如果数据库查询失败）
+	// 注意：这是内存缓存，重启后可能丢失，只应在数据库查询失败时使用
 	posKey := symbol + "_" + side
 	at.positionTimeMu.RLock()
-	defer at.positionTimeMu.RUnlock()
-	if ts, exists := at.positionFirstSeenTime[posKey]; exists {
-		return time.Unix(ts/1000, (ts%1000)*1000000)
+	ts, exists := at.positionFirstSeenTime[posKey]
+	at.positionTimeMu.RUnlock()
+	if exists {
+		openTime := time.Unix(ts/1000, (ts%1000)*1000000)
+		// 记录警告，提示使用了缓存数据
+		log.Printf("⚠️  使用缓存获取 %s %s 的开仓时间: %s（建议检查数据库记录）", symbol, side, openTime.Format("2006-01-02 15:04:05"))
+		return openTime
 	}
 
 	// 方法3: 从持仓信息中获取（如果可能）
+	// 注意：币安API通常不提供开仓时间，这里返回零值
 	positions, err := at.trader.GetPositions()
 	if err == nil {
 		for _, pos := range positions {
 			if pos["symbol"] == symbol && pos["side"] == side {
-				// 尝试从持仓信息中获取开仓时间（如果有的话）
-				// 注意：币安API可能不提供开仓时间，这里返回零值
+				// 币安API可能不提供开仓时间，返回零值
 				return time.Time{}
 			}
 		}
@@ -3086,8 +3128,9 @@ func (at *AutoTrader) recordTradeHistory(side string, decision *decision.Decisio
 	if closeLogic == "" && at.storageAdapter != nil {
 		tradeStorage := at.storageAdapter.GetTradeStorage()
 		if tradeStorage != nil {
-			// 使用openAction.Timestamp查询交易记录（即使已平仓也能找到）
-			existingTrade, err := tradeStorage.GetOpenTradeByTime(decision.Symbol, openAction.Timestamp)
+			// 使用openAction.Timestamp和side查询交易记录（即使已平仓也能找到）
+			// 改进：增加side参数，提高匹配精度
+			existingTrade, err := tradeStorage.GetOpenTradeByTimeAndSide(decision.Symbol, side, openAction.Timestamp)
 			if err == nil && existingTrade != nil && existingTrade.ExitLogic != "" {
 				closeLogic = existingTrade.ExitLogic
 			}
@@ -3129,39 +3172,62 @@ func (at *AutoTrader) recordTradeHistory(side string, decision *decision.Decisio
 			}
 
 			if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
-				log.Printf("⚠️  更新交易历史到数据库失败: %v，尝试使用LogTrade", err)
-				// 如果更新失败（可能是旧数据），尝试使用LogTrade（向后兼容）
-				dbTradeOld := &storage.TradeRecord{
-					TradeID:        trade.TradeID,
-					Symbol:         trade.Symbol,
-					Side:           trade.Side,
-					OpenTime:       trade.OpenTime,
-					OpenPrice:      trade.OpenPrice,
-					OpenQuantity:   trade.OpenQuantity,
-					OpenLeverage:   trade.OpenLeverage,
-					OpenOrderID:    trade.OpenOrderID,
-					OpenReason:     trade.OpenReason,
-					OpenCycleNum:   trade.OpenCycleNum,
-					CloseTime:      &closeTime,
-					ClosePrice:     trade.ClosePrice,
-					CloseQuantity:  trade.CloseQuantity,
-					CloseOrderID:   trade.CloseOrderID,
-					CloseReason:    closeLogic,
-					CloseCycleNum:  trade.CloseCycleNum,
-					IsForced:       trade.IsForced,
-					ForcedReason:   trade.ForcedReason,
-					Duration:       trade.Duration,
-					PositionValue:  trade.PositionValue,
-					MarginUsed:     trade.MarginUsed,
-					PnL:            trade.PnL,
-					PnLPct:         trade.PnLPct,
-					WasStopLoss:    trade.WasStopLoss,
-					Success:        trade.Success,
-					Error:          trade.Error,
-					CloseLogic:     closeLogic,
-				}
-				if err := tradeStorage.LogTrade(dbTradeOld); err != nil {
-					log.Printf("⚠️  保存交易历史到数据库失败: %v", err)
+				log.Printf("⚠️  更新交易历史到数据库失败: %v，检查记录是否存在", err)
+				// 改进：如果更新失败，先检查记录是否存在，避免创建重复记录
+				existing, _ := tradeStorage.GetOpenTradeByTimeAndSide(decision.Symbol, side, openAction.Timestamp)
+				if existing != nil {
+					// 记录存在但更新失败，可能是数据库错误，记录详细错误
+					log.Printf("⚠️  交易记录存在但更新失败，可能是数据库错误: %v", err)
+					// 不创建新记录，避免重复
+				} else {
+					// 记录不存在，使用CreateOrUpdateTrade创建（避免重复）
+					log.Printf("ℹ️  交易记录不存在，使用CreateOrUpdateTrade创建新记录")
+					// 构建完整的交易记录用于创建
+					// 尝试从数据库获取entry_logic和exit_logic（如果记录曾经存在过）
+					var entryLogic, exitLogic string
+					existingForLogic, _ := tradeStorage.GetOpenTradeByTimeAndSide(decision.Symbol, side, openAction.Timestamp)
+					if existingForLogic != nil {
+						entryLogic = existingForLogic.EntryLogic
+						exitLogic = existingForLogic.ExitLogic
+					}
+					
+					dbTradeNew := &storage.TradeRecord{
+						TradeID:        trade.TradeID,
+						Symbol:         trade.Symbol,
+						Side:           trade.Side,
+						OpenTime:       trade.OpenTime,
+						OpenPrice:      trade.OpenPrice,
+						OpenQuantity:   trade.OpenQuantity,
+						OpenLeverage:   trade.OpenLeverage,
+						OpenOrderID:    trade.OpenOrderID,
+						OpenReason:     trade.OpenReason,
+						OpenCycleNum:   trade.OpenCycleNum,
+						CloseTime:      &closeTime,
+						ClosePrice:     trade.ClosePrice,
+						CloseQuantity:  trade.CloseQuantity,
+						CloseOrderID:   trade.CloseOrderID,
+						CloseReason:    closeLogic,
+						CloseCycleNum:  trade.CloseCycleNum,
+						IsForced:       trade.IsForced,
+						ForcedReason:   trade.ForcedReason,
+						Duration:       trade.Duration,
+						PositionValue:  trade.PositionValue,
+						MarginUsed:     trade.MarginUsed,
+						PnL:            trade.PnL,
+						PnLPct:         trade.PnLPct,
+						WasStopLoss:    trade.WasStopLoss,
+						Success:        trade.Success,
+						Error:          trade.Error,
+						CloseLogic:     closeLogic,
+						EntryLogic:     entryLogic, // 从数据库获取或为空
+						ExitLogic:      exitLogic,  // 从数据库获取或为空
+					}
+					// 使用CreateOrUpdateTrade，如果记录已存在则更新，不存在则创建
+					if err := tradeStorage.CreateOrUpdateTrade(dbTradeNew); err != nil {
+						log.Printf("⚠️  创建或更新交易历史失败: %v", err)
+					} else {
+						log.Printf("✅ 已创建或更新交易记录（fallback）")
+					}
 				}
 			} else {
 				log.Printf("✓ 已更新交易记录的close_logic: %s", closeLogic)
@@ -3177,17 +3243,50 @@ func (at *AutoTrader) recordTradeHistoryFromAction(symbol, side string, closeAct
 }
 
 // recordTradeHistoryFromPosition 从持仓信息中记录交易历史（用于找不到开仓记录的情况）
+// 改进：优先从数据库获取openTime，确保已保存到数据库
 func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeAction *logger.DecisionAction, isForced bool, forcedReason string) {
-	// 尝试从positionFirstSeenTime获取开仓时间
-	posKey := symbol + "_" + side
-	at.positionTimeMu.RLock()
+	// 改进：优先从数据库获取开仓时间（这是最可靠的方式）
 	var openTime time.Time
 	var hasOpenTime bool
-	if ts, exists := at.positionFirstSeenTime[posKey]; exists {
-		openTime = time.Unix(ts/1000, (ts%1000)*1000000)
-		hasOpenTime = true
+	
+	// 方法1: 优先从数据库获取（最可靠）
+	if at.storageAdapter != nil {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			// 先尝试查找未平仓交易
+			trade, err := tradeStorage.GetOpenTrade(symbol, side)
+			if err == nil && trade != nil {
+				openTime = trade.OpenTime
+				hasOpenTime = true
+				log.Printf("ℹ️  从数据库获取到 %s %s 的开仓时间: %s", symbol, side, openTime.Format("2006-01-02 15:04:05"))
+			} else {
+				// 如果未平仓交易找不到，尝试查找最近已平仓的交易
+				localTrades, err := tradeStorage.GetTradesBySymbol(symbol, 1)
+				if err == nil {
+					for _, t := range localTrades {
+						if t.Side == side {
+							openTime = t.OpenTime
+							hasOpenTime = true
+							log.Printf("ℹ️  从数据库（已平仓记录）获取到 %s %s 的开仓时间: %s", symbol, side, openTime.Format("2006-01-02 15:04:05"))
+							break
+						}
+					}
+				}
+			}
+		}
 	}
-	at.positionTimeMu.RUnlock()
+	
+	// 方法2: 如果数据库查询失败，从positionFirstSeenTime获取（临时fallback）
+	if !hasOpenTime {
+		posKey := symbol + "_" + side
+		at.positionTimeMu.RLock()
+		if ts, exists := at.positionFirstSeenTime[posKey]; exists {
+			openTime = time.Unix(ts/1000, (ts%1000)*1000000)
+			hasOpenTime = true
+			log.Printf("⚠️  使用缓存获取 %s %s 的开仓时间: %s（建议检查数据库记录）", symbol, side, openTime.Format("2006-01-02 15:04:05"))
+		}
+		at.positionTimeMu.RUnlock()
+	}
 
 	// 获取当前持仓信息（平仓后可能已经不存在，尝试从决策记录中获取）
 	var entryPrice, quantity, leverage float64
@@ -3389,48 +3488,61 @@ func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeA
 				}
 
 				if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
-					log.Printf("⚠️  更新交易历史失败（可能是旧数据）: %v，尝试创建新记录", err)
-					// 如果更新失败，尝试创建新记录（向后兼容）
-					dbTradeOld := &storage.TradeRecord{
-						TradeID:         trade.TradeID,
-						Symbol:          trade.Symbol,
-						Side:            trade.Side,
-						OpenTime:        trade.OpenTime,
-						OpenPrice:       trade.OpenPrice,
-						OpenQuantity:    trade.OpenQuantity,
-						OpenLeverage:    trade.OpenLeverage,
-						OpenOrderID:     trade.OpenOrderID,
-						OpenReason:      trade.OpenReason,
-						OpenCycleNum:    trade.OpenCycleNum,
-						CloseTime:       &closeTime,
-						ClosePrice:      trade.ClosePrice,
-						CloseQuantity:   trade.CloseQuantity,
-						CloseOrderID:    trade.CloseOrderID,
-						CloseReason:     forcedReason,
-						CloseCycleNum:   trade.CloseCycleNum,
-						IsForced:        trade.IsForced,
-						ForcedReason:    trade.ForcedReason,
-						Duration:        trade.Duration,
-						PositionValue:   trade.PositionValue,
-						MarginUsed:      trade.MarginUsed,
-						PnL:             trade.PnL,
-						PnLPct:          trade.PnLPct,
-						WasStopLoss:     trade.WasStopLoss,
-						Success:         trade.Success,
-						Error:           trade.Error,
-						ForcedCloseLogic: forcedReason,
-					}
-					if err := tradeStorage.LogTrade(dbTradeOld); err != nil {
-						log.Printf("⚠️  保存交易历史到数据库失败: %v", err)
+					log.Printf("⚠️  更新交易历史失败: %v，检查记录是否存在", err)
+					// 改进：如果更新失败，先检查记录是否存在，避免创建重复记录
+					existing, _ := tradeStorage.GetOpenTradeByTimeAndSide(symbol, side, openTime)
+					if existing != nil {
+						// 记录存在但更新失败，可能是数据库错误，记录详细错误
+						log.Printf("⚠️  交易记录存在但更新失败，可能是数据库错误: %v", err)
+						// 不创建新记录，避免重复
 					} else {
-						log.Printf("✅ 强制平仓交易历史已记录: %s %s, 盈亏: %.2f USDT (%.2f%%)", symbol, side, trade.PnL, trade.PnLPct)
+						// 记录不存在，使用CreateOrUpdateTrade创建（避免重复）
+						log.Printf("ℹ️  交易记录不存在，使用CreateOrUpdateTrade创建新记录")
+						// 构建完整的交易记录用于创建
+						dbTradeNew := &storage.TradeRecord{
+							TradeID:         trade.TradeID,
+							Symbol:          trade.Symbol,
+							Side:            trade.Side,
+							OpenTime:        trade.OpenTime,
+							OpenPrice:       trade.OpenPrice,
+							OpenQuantity:    trade.OpenQuantity,
+							OpenLeverage:    trade.OpenLeverage,
+							OpenOrderID:     trade.OpenOrderID,
+							OpenReason:      trade.OpenReason,
+							OpenCycleNum:    trade.OpenCycleNum,
+							CloseTime:       &closeTime,
+							ClosePrice:      trade.ClosePrice,
+							CloseQuantity:   trade.CloseQuantity,
+							CloseOrderID:    trade.CloseOrderID,
+							CloseReason:     forcedReason,
+							CloseCycleNum:   trade.CloseCycleNum,
+							IsForced:        trade.IsForced,
+							ForcedReason:    trade.ForcedReason,
+							Duration:        trade.Duration,
+							PositionValue:   trade.PositionValue,
+							MarginUsed:      trade.MarginUsed,
+							PnL:             trade.PnL,
+							PnLPct:          trade.PnLPct,
+							WasStopLoss:     trade.WasStopLoss,
+							Success:         trade.Success,
+							Error:           trade.Error,
+							ForcedCloseLogic: forcedReason,
+							EntryLogic:      "系统外开仓", // 标记为系统外开仓
+							ExitLogic:       "",           // 系统外开仓没有计划平仓逻辑
+						}
+						// 使用CreateOrUpdateTrade，如果记录已存在则更新，不存在则创建
+						if err := tradeStorage.CreateOrUpdateTrade(dbTradeNew); err != nil {
+							log.Printf("⚠️  创建或更新交易历史失败: %v", err)
+						} else {
+							log.Printf("✅ 已创建或更新交易记录（fallback）: %s %s, 盈亏: %.2f USDT (%.2f%%)", symbol, side, trade.PnL, trade.PnLPct)
+						}
 					}
 				} else {
 					log.Printf("✓ 已更新交易记录的forced_close_logic: %s", forcedReason)
 					log.Printf("✅ 强制平仓交易历史已更新: %s %s, 盈亏: %.2f USDT (%.2f%%)", symbol, side, trade.PnL, trade.PnLPct)
 				}
 			} else {
-				// 非强制平仓或无法获取开仓时间，使用LogTrade创建新记录
+				// 非强制平仓或无法获取开仓时间，使用CreateOrUpdateTrade创建新记录（避免重复）
 				closeTime := trade.CloseTime
 				dbTrade := &storage.TradeRecord{
 					TradeID:         trade.TradeID,
@@ -3460,9 +3572,12 @@ func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeA
 					Success:         trade.Success,
 					Error:           trade.Error,
 					ForcedCloseLogic: forcedReason,
+					EntryLogic:      "系统外开仓", // 标记为系统外开仓
+					ExitLogic:       "",           // 系统外开仓没有计划平仓逻辑
 				}
-				if err := tradeStorage.LogTrade(dbTrade); err != nil {
-					log.Printf("⚠️  保存交易历史到数据库失败: %v", err)
+				// 改进：使用CreateOrUpdateTrade，如果记录已存在则更新，不存在则创建
+				if err := tradeStorage.CreateOrUpdateTrade(dbTrade); err != nil {
+					log.Printf("⚠️  创建或更新交易历史失败: %v", err)
 				} else {
 					log.Printf("✅ 交易历史已记录: %s %s, 盈亏: %.2f USDT (%.2f%%)", symbol, side, trade.PnL, trade.PnLPct)
 				}
@@ -4377,7 +4492,8 @@ func (at *AutoTrader) SyncManualTradesFromExchange() error {
 			tradeStorage := at.storageAdapter.GetTradeStorage()
 			if tradeStorage != nil {
 				// 先尝试使用时间范围查询（即使交易已平仓也能找到）
-				existingTrade, _ = tradeStorage.GetOpenTradeByTime(agg.symbol, openTime)
+				// 改进：增加side参数，提高匹配精度
+				existingTrade, _ = tradeStorage.GetOpenTradeByTimeAndSide(agg.symbol, agg.tradeSide, openTime)
 				
 				// 如果使用时间范围查询找不到，尝试从最近的交易中查找（匹配symbol+side，时间接近）
 				if existingTrade == nil {

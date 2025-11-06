@@ -522,12 +522,12 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 			sb.WriteString("\n")
 		}
 		
-		// 3分钟数据（完整序列）
-		if data.Minute3Data != nil {
-			sb.WriteString("**3分钟 (3m) 数据**:\n")
-			sb.WriteString(formatMarketDataForMultiTimeframe(data.Minute3Data))
-			sb.WriteString("\n")
-		}
+		// 3分钟数据（完整序列）- 已注释，只保留4小时、1小时、15分钟
+		// if data.Minute3Data != nil {
+		// 	sb.WriteString("**3分钟 (3m) 数据**:\n")
+		// 	sb.WriteString(formatMarketDataForMultiTimeframe(data.Minute3Data))
+		// 	sb.WriteString("\n")
+		// }
 	}
 	
 	// ==================== AI学习和进化数据 ====================
