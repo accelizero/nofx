@@ -86,29 +86,36 @@ func (w *PositionLogicWrapper) SaveExitLogic(symbol, side string, exitLogic *dec
 }
 
 // GetLogic 获取持仓逻辑（兼容旧接口）
+// 注意：为了确保读取到最新的止损止盈数据，每次都会从数据库重新加载并更新缓存
 func (w *PositionLogicWrapper) GetLogic(symbol, side string) *decision.PositionLogic {
-	// 先检查缓存
-	w.mu.RLock()
 	posKey := symbol + "_" + side
-	logic, exists := w.cache[posKey]
-	w.mu.RUnlock()
-
-	if exists {
-		return logic
-	}
-
-	// 从数据库加载
+	
+	// 始终从数据库加载最新数据（确保读取到最新的止损止盈设置）
 	dbLogic, err := w.storage.GetLogic(symbol, side)
 	if err != nil {
+		// 如果数据库查询失败，尝试从缓存读取（降级处理）
+		w.mu.RLock()
+		logic, exists := w.cache[posKey]
+		w.mu.RUnlock()
+		if exists {
+			return logic
+		}
 		return nil
 	}
 
 	if dbLogic == nil {
+		// 数据库中没有记录，尝试从缓存读取
+		w.mu.RLock()
+		logic, exists := w.cache[posKey]
+		w.mu.RUnlock()
+		if exists {
+			return logic
+		}
 		return nil
 	}
 
 	// 转换为旧格式
-	logic = &decision.PositionLogic{
+	logic := &decision.PositionLogic{
 		StopLoss:   dbLogic.StopLoss,
 		TakeProfit: dbLogic.TakeProfit,
 	}
@@ -131,7 +138,7 @@ func (w *PositionLogicWrapper) GetLogic(symbol, side string) *decision.PositionL
 		}
 	}
 
-	// 更新缓存
+	// 更新缓存（确保缓存与数据库同步）
 	w.mu.Lock()
 	w.cache[posKey] = logic
 	w.mu.Unlock()
@@ -185,27 +192,48 @@ func (w *PositionLogicWrapper) SaveTakeProfit(symbol, side string, takeProfit fl
 
 // SaveStopLossAndTakeProfit 同时保存止损和止盈价格（兼容旧接口）
 func (w *PositionLogicWrapper) SaveStopLossAndTakeProfit(symbol, side string, stopLoss, takeProfit float64) error {
+	// 先保存到数据库
 	err := w.storage.SaveStopLossAndTakeProfit(symbol, side, stopLoss, takeProfit)
 	if err != nil {
 		return err
 	}
 
-	// 更新缓存
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	posKey := symbol + "_" + side
-	logic, exists := w.cache[posKey]
-	if !exists {
-		logic = &decision.PositionLogic{}
-		w.cache[posKey] = logic
-	}
-
-	if stopLoss > 0 {
-		logic.StopLoss = stopLoss
-	}
-	if takeProfit > 0 {
-		logic.TakeProfit = takeProfit
+	// 保存后，从数据库重新加载最新数据并更新缓存（确保缓存与数据库同步）
+	// 这样可以确保即使只更新一个字段，另一个字段也能从数据库读取到最新值
+	dbLogic, err := w.storage.GetLogic(symbol, side)
+	if err == nil && dbLogic != nil {
+		w.mu.Lock()
+		defer w.mu.Unlock()
+		
+		posKey := symbol + "_" + side
+		logic, exists := w.cache[posKey]
+		if !exists {
+			logic = &decision.PositionLogic{}
+			w.cache[posKey] = logic
+		}
+		
+		// 从数据库加载的值更新缓存（确保完整同步）
+		logic.StopLoss = dbLogic.StopLoss
+		logic.TakeProfit = dbLogic.TakeProfit
+		
+		// 更新逻辑字段（如果数据库中有）
+		if dbLogic.EntryLogic != nil {
+			logic.EntryLogic = &decision.EntryLogic{
+				Reasoning:      dbLogic.EntryLogic.Reasoning,
+				Conditions:     convertLogicConditionsFromNew(dbLogic.EntryLogic.Conditions),
+				MultiTimeframe: convertMultiTimeframeLogicFromNew(dbLogic.EntryLogic.MultiTimeframe),
+				Timestamp:      dbLogic.EntryLogic.Timestamp,
+			}
+		}
+		
+		if dbLogic.ExitLogic != nil {
+			logic.ExitLogic = &decision.ExitLogic{
+				Reasoning:      dbLogic.ExitLogic.Reasoning,
+				Conditions:     convertLogicConditionsFromNew(dbLogic.ExitLogic.Conditions),
+				MultiTimeframe: convertMultiTimeframeLogicFromNew(dbLogic.ExitLogic.MultiTimeframe),
+				Timestamp:      dbLogic.ExitLogic.Timestamp,
+			}
+		}
 	}
 
 	return nil

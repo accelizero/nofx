@@ -439,13 +439,11 @@ func (mta *MultiTimeframeAnalyzer) calculateSingleTimeframeScore(data *market.Da
 	return score
 }
 
-// calculateMultiDimensionalConsistency 计算多维度一致性
+// calculateMultiDimensionalConsistency 计算多维度一致性（不包含日线）
 func (mta *MultiTimeframeAnalyzer) calculateMultiDimensionalConsistency(data *UnifiedTimeframeData) float64 {
-	// 收集所有时间框架的数据
+	// 收集时间框架的数据（不包含日线）
 	timeframes := []*market.Data{}
-	if data.DailyData != nil {
-		timeframes = append(timeframes, data.DailyData)
-	}
+	// 注意：日线数据不参与一致性评分计算
 	if data.Hourly4Data != nil {
 		timeframes = append(timeframes, data.Hourly4Data)
 	}
@@ -472,8 +470,9 @@ func (mta *MultiTimeframeAnalyzer) calculateMultiDimensionalConsistency(data *Un
 	// 3. 波动一致性（RSI位置）
 	volatilityConsistency := mta.calculateVolatilityConsistency(timeframes)
 	
-	// 加权平均（趋势权重更高）
-	consistency := trendConsistency*0.5 + momentumConsistency*0.3 + volatilityConsistency*0.2
+	// 重新设计的权重：动量一致性最重要（0.45），趋势一致性次之（0.35），波动一致性补充（0.2）
+	// 去除日线后，动量更能反映短期多时间框架的一致性
+	consistency := trendConsistency*0.35 + momentumConsistency*0.45 + volatilityConsistency*0.2
 	
 	return consistency
 }

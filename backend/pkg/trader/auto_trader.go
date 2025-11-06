@@ -354,10 +354,11 @@ func (at *AutoTrader) runCycle() error {
 
 	// 2.6. 同步手动交易到历史记录 - 在每次AI周期开始时检查是否有手动平仓
 	// 这样可以确保手动平仓被正确记录到交易历史中
-	if err := at.SyncManualTradesFromExchange(); err != nil {
-		log.Printf("⚠️  同步手动交易失败: %v", err)
-		// 即使同步失败也不影响主要流程
-	}
+	// 已注释：禁用从历史恢复交易记录的功能
+	// if err := at.SyncManualTradesFromExchange(); err != nil {
+	// 	log.Printf("⚠️  同步手动交易失败: %v", err)
+	// 	// 即使同步失败也不影响主要流程
+	// }
 
 	// 2.7. 重置日盈亏（每天重置）- 需要账户数据来计算
 	if needResetDailyPnL {
@@ -652,58 +653,20 @@ func (at *AutoTrader) runCycle() error {
 					Success:   true,
 				}
 				
-				// 获取平仓逻辑：优先从决策记录中查找，然后从PositionLogicManager获取开仓时保存的exit_reasoning
+				// 获取平仓逻辑：从历史交易表读取开仓时保存的exit_logic
 				closeReason := ""
-				
-				// 1. 尝试从决策记录中查找对应的平仓决策（查找最近5分钟内的决策）
 				if at.storageAdapter != nil {
-					decisionStorage := at.storageAdapter.GetDecisionStorage()
-					if decisionStorage != nil {
-						records, err := decisionStorage.GetLatestRecords(at.id, 50)
-						if err == nil {
-							timeWindow := 5 * time.Minute
-							now := time.Now()
-							for _, record := range records {
-								// 检查时间是否接近（允许±5分钟误差）
-								timeDiff := record.Timestamp.Sub(now)
-								if timeDiff < 0 {
-									timeDiff = -timeDiff
-								}
-								if timeDiff > timeWindow {
-									continue
-								}
-								
-								// 解析decisions字段
-								var decisions []decision.Decision
-								if err := json.Unmarshal(record.Decisions, &decisions); err != nil {
-									continue
-								}
-								
-								// 查找匹配的平仓决策
-								closeActionStr := fmt.Sprintf("close_%s", side)
-								for _, dec := range decisions {
-									if dec.Action == closeActionStr && dec.Symbol == symbol && dec.Reasoning != "" {
-										closeReason = dec.Reasoning
-										break
-									}
-								}
-								if closeReason != "" {
-									break
-								}
-							}
+					tradeStorage := at.storageAdapter.GetTradeStorage()
+					if tradeStorage != nil {
+						// 从历史交易表中查询已有的交易记录，获取exit_logic
+						existingTrade, err := tradeStorage.GetOpenTrade(symbol, side)
+						if err == nil && existingTrade != nil && existingTrade.ExitLogic != "" {
+							closeReason = existingTrade.ExitLogic
 						}
 					}
 				}
 				
-				// 2. 如果从决策记录中找不到，尝试从PositionLogicManager获取开仓时保存的exit_reasoning
-				if closeReason == "" && at.positionLogicManager != nil {
-					logic := at.positionLogicManager.GetLogic(symbol, side)
-					if logic != nil && logic.ExitLogic != nil && logic.ExitLogic.Reasoning != "" {
-						closeReason = logic.ExitLogic.Reasoning
-					}
-				}
-				
-				// 3. 如果都没有，使用"手动平仓"作为默认值
+				// 如果都没有，使用默认值
 				if closeReason == "" {
 					closeReason = "手动平仓"
 				}
@@ -716,6 +679,7 @@ func (at *AutoTrader) runCycle() error {
 					tradeStorage := at.storageAdapter.GetTradeStorage()
 					if tradeStorage != nil {
 						// 转换logger.TradeRecord到storage.TradeRecord
+						closeTimeVal := trade.CloseTime
 						dbTrade := &storage.TradeRecord{
 							TradeID:        trade.TradeID,
 							Symbol:         trade.Symbol,
@@ -727,7 +691,7 @@ func (at *AutoTrader) runCycle() error {
 							OpenOrderID:    trade.OpenOrderID,
 							OpenReason:     trade.OpenReason,
 							OpenCycleNum:   trade.OpenCycleNum,
-							CloseTime:      trade.CloseTime,
+							CloseTime:      &closeTimeVal,
 							ClosePrice:     trade.ClosePrice,
 							CloseQuantity:  trade.CloseQuantity,
 							CloseOrderID:   trade.CloseOrderID,
@@ -1938,6 +1902,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(dec *decision.Decision, actionRe
 	}
 
 	// 保存进场逻辑和出场逻辑（复用已获取的市场数据）
+	var entryLogicText, exitLogicText string
 	if dec.Reasoning != "" {
 		// 构建简化的上下文（只包含必要的市场数据）
 		ctx := &decision.Context{
@@ -1949,6 +1914,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(dec *decision.Decision, actionRe
 		
 		// 保存进场逻辑
 		entryLogic := decision.ExtractEntryLogicFromReasoning(dec.Reasoning, ctx, dec.Symbol)
+		entryLogicText = entryLogic.Reasoning
 		if err := at.positionLogicManager.SaveEntryLogic(dec.Symbol, "long", entryLogic); err != nil {
 			log.Printf("  ⚠ 保存进场逻辑失败: %v", err)
 		} else {
@@ -1958,6 +1924,7 @@ func (at *AutoTrader) executeOpenLongWithRecord(dec *decision.Decision, actionRe
 		// 保存出场逻辑（如果提供）
 		if dec.ExitReasoning != "" {
 			exitLogic := decision.ExtractExitLogicFromReasoning(dec.ExitReasoning, ctx, dec.Symbol)
+			exitLogicText = exitLogic.Reasoning
 			if err := at.positionLogicManager.SaveExitLogic(dec.Symbol, "long", exitLogic); err != nil {
 				log.Printf("  ⚠ 保存出场逻辑失败: %v", err)
 			} else {
@@ -1968,7 +1935,41 @@ func (at *AutoTrader) executeOpenLongWithRecord(dec *decision.Decision, actionRe
 		}
 	}
 
-	return nil
+	// 创建交易记录（建仓时创建，后续操作更新）
+	if at.storageAdapter != nil {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			openTime := actionRecord.Timestamp
+			tradeID := fmt.Sprintf("%s_%s_%d", dec.Symbol, "long", openTime.Unix())
+			positionValue := actionRecord.Quantity * actionRecord.Price
+			marginUsed := positionValue / float64(actionRecord.Leverage)
+
+			dbTrade := &storage.TradeRecord{
+				TradeID:       tradeID,
+				Symbol:        dec.Symbol,
+				Side:          "long",
+				OpenTime:      openTime,
+				OpenPrice:     actionRecord.Price,
+				OpenQuantity: actionRecord.Quantity,
+				OpenLeverage:  actionRecord.Leverage,
+			OpenOrderID:   actionRecord.OrderID,
+			OpenReason:    dec.Reasoning,
+			OpenCycleNum:  int(atomic.LoadInt64(&at.callCount)),
+			PositionValue: positionValue,
+			MarginUsed:    marginUsed,
+			EntryLogic:    entryLogicText,
+			ExitLogic:     exitLogicText,
+		}
+
+		if err := tradeStorage.CreateTrade(dbTrade); err != nil {
+			log.Printf("  ⚠ 创建交易记录失败: %v", err)
+		} else {
+			log.Printf("  ✓ 已创建交易记录")
+		}
+	}
+}
+
+return nil
 }
 
 // executeOpenShortWithRecord 执行开空仓并记录详细信息
@@ -2092,6 +2093,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(dec *decision.Decision, actionR
 	}
 
 	// 保存进场逻辑和出场逻辑（复用已获取的市场数据）
+	var entryLogicText, exitLogicText string
 	if dec.Reasoning != "" {
 		ctx := &decision.Context{
 			MultiTimeframeConfig: at.config.MultiTimeframeConfig,
@@ -2102,6 +2104,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(dec *decision.Decision, actionR
 		
 		// 保存进场逻辑
 		entryLogic := decision.ExtractEntryLogicFromReasoning(dec.Reasoning, ctx, dec.Symbol)
+		entryLogicText = entryLogic.Reasoning
 		if err := at.positionLogicManager.SaveEntryLogic(dec.Symbol, "short", entryLogic); err != nil {
 			log.Printf("  ⚠ 保存进场逻辑失败: %v", err)
 		} else {
@@ -2111,6 +2114,7 @@ func (at *AutoTrader) executeOpenShortWithRecord(dec *decision.Decision, actionR
 		// 保存出场逻辑（如果提供）
 		if dec.ExitReasoning != "" {
 			exitLogic := decision.ExtractExitLogicFromReasoning(dec.ExitReasoning, ctx, dec.Symbol)
+			exitLogicText = exitLogic.Reasoning
 			if err := at.positionLogicManager.SaveExitLogic(dec.Symbol, "short", exitLogic); err != nil {
 				log.Printf("  ⚠ 保存出场逻辑失败: %v", err)
 			} else {
@@ -2118,6 +2122,40 @@ func (at *AutoTrader) executeOpenShortWithRecord(dec *decision.Decision, actionR
 			}
 		} else {
 			log.Printf("  ⚠ 警告：开仓时未提供出场逻辑（exit_reasoning），建议在开仓时规划好出场逻辑")
+		}
+	}
+
+	// 创建交易记录（建仓时创建，后续操作更新）
+	if at.storageAdapter != nil {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			openTime := actionRecord.Timestamp
+			tradeID := fmt.Sprintf("%s_%s_%d", dec.Symbol, "short", openTime.Unix())
+			positionValue := actionRecord.Quantity * actionRecord.Price
+			marginUsed := positionValue / float64(actionRecord.Leverage)
+
+			dbTrade := &storage.TradeRecord{
+				TradeID:       tradeID,
+				Symbol:        dec.Symbol,
+				Side:          "short",
+				OpenTime:      openTime,
+				OpenPrice:     actionRecord.Price,
+				OpenQuantity: actionRecord.Quantity,
+				OpenLeverage:  actionRecord.Leverage,
+				OpenOrderID:   actionRecord.OrderID,
+				OpenReason:    dec.Reasoning,
+				OpenCycleNum:  int(atomic.LoadInt64(&at.callCount)),
+				PositionValue: positionValue,
+				MarginUsed:    marginUsed,
+				EntryLogic:    entryLogicText,
+				ExitLogic:     exitLogicText,
+			}
+
+			if err := tradeStorage.CreateTrade(dbTrade); err != nil {
+				log.Printf("  ⚠ 创建交易记录失败: %v", err)
+			} else {
+				log.Printf("  ✓ 已创建交易记录")
+			}
 		}
 	}
 
@@ -2203,43 +2241,11 @@ func (at *AutoTrader) executeCloseLongWithRecord(dec *decision.Decision, actionR
 	delete(at.positionFirstSeenTime, posKeyForTime)
 	at.positionTimeMu.Unlock()
 
-	// 在删除逻辑之前，先获取开仓时保存的exit_reasoning（用于记录交易历史）
-	var savedExitReasoning string
-	if at.positionLogicManager != nil {
-		logic := at.positionLogicManager.GetLogic(dec.Symbol, "long")
-		if logic != nil && logic.ExitLogic != nil && logic.ExitLogic.Reasoning != "" {
-			savedExitReasoning = logic.ExitLogic.Reasoning
-		}
-	}
-
-	// 记录交易历史（从持仓信息中获取开仓信息）
-	// 保存出场逻辑（如果提供）
-	if dec.Reasoning != "" {
-		ctx := &decision.Context{
-			MultiTimeframeConfig: at.config.MultiTimeframeConfig,
-			MarketDataMap:        make(map[string]*market.Data),
-		}
-		if marketData, err := market.Get(dec.Symbol); err == nil {
-			ctx.MarketDataMap[dec.Symbol] = marketData
-			exitLogic := decision.ExtractExitLogicFromReasoning(dec.Reasoning, ctx, dec.Symbol)
-			if err := at.positionLogicManager.SaveExitLogic(dec.Symbol, "long", exitLogic); err != nil {
-				log.Printf("  ⚠ 保存出场逻辑失败: %v", err)
-			} else {
-				log.Printf("  ✓ 已保存出场逻辑")
-			}
-		}
-	}
-
 	// 删除持仓逻辑（平仓后不再需要，止损/止盈价格会一起删除）
 	if err := at.positionLogicManager.DeleteLogic(dec.Symbol, "long"); err != nil {
 		log.Printf("  ⚠ 删除持仓逻辑失败: %v", err)
 	} else {
 		log.Printf("  ✓ 已删除持仓逻辑（包含止损/止盈价格）")
-	}
-
-	// 如果平仓时没有提供reasoning，使用保存的exit_reasoning
-	if dec.Reasoning == "" && savedExitReasoning != "" {
-		dec.Reasoning = savedExitReasoning
 	}
 
 	at.recordTradeHistory("long", dec, actionRecord, false, "")
@@ -2327,42 +2333,11 @@ func (at *AutoTrader) executeCloseShortWithRecord(dec *decision.Decision, action
 	delete(at.positionFirstSeenTime, posKeyForTime)
 	at.positionTimeMu.Unlock()
 
-	// 在删除逻辑之前，先获取开仓时保存的exit_reasoning（用于记录交易历史）
-	var savedExitReasoning string
-	if at.positionLogicManager != nil {
-		logic := at.positionLogicManager.GetLogic(dec.Symbol, "short")
-		if logic != nil && logic.ExitLogic != nil && logic.ExitLogic.Reasoning != "" {
-			savedExitReasoning = logic.ExitLogic.Reasoning
-		}
-	}
-
-	// 保存出场逻辑（如果提供，在删除逻辑之前保存）
-	if dec.Reasoning != "" {
-		ctx := &decision.Context{
-			MultiTimeframeConfig: at.config.MultiTimeframeConfig,
-			MarketDataMap:        make(map[string]*market.Data),
-		}
-		if marketData, err := market.Get(dec.Symbol); err == nil {
-			ctx.MarketDataMap[dec.Symbol] = marketData
-			exitLogic := decision.ExtractExitLogicFromReasoning(dec.Reasoning, ctx, dec.Symbol)
-			if err := at.positionLogicManager.SaveExitLogic(dec.Symbol, "short", exitLogic); err != nil {
-				log.Printf("  ⚠ 保存出场逻辑失败: %v", err)
-			} else {
-				log.Printf("  ✓ 已保存出场逻辑")
-			}
-		}
-	}
-
 	// 删除持仓逻辑（平仓后不再需要，止损/止盈价格会一起删除）
 	if err := at.positionLogicManager.DeleteLogic(dec.Symbol, "short"); err != nil {
 		log.Printf("  ⚠ 删除持仓逻辑失败: %v", err)
 	} else {
 		log.Printf("  ✓ 已删除持仓逻辑（包含止损/止盈价格）")
-	}
-
-	// 如果平仓时没有提供reasoning，使用保存的exit_reasoning
-	if dec.Reasoning == "" && savedExitReasoning != "" {
-		dec.Reasoning = savedExitReasoning
 	}
 
 	// 记录交易历史（从持仓信息中获取开仓信息）
@@ -2641,6 +2616,27 @@ func (at *AutoTrader) executeUpdateTakeProfit(dec *decision.Decision, actionReco
 			log.Printf("  ⚠ 保存后验证读取失败: 无法读取到保存的值")
 		}
 	}
+
+	// 更新交易记录的update_tp_logic字段
+	if at.storageAdapter != nil && dec.Reasoning != "" {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			// 获取开仓时间（从持仓信息或从已保存的交易记录中获取）
+			openTime := at.getOpenTimeForPosition(dec.Symbol, positionSide)
+			if !openTime.IsZero() {
+				dbTrade := &storage.TradeRecord{
+					Symbol:        dec.Symbol,
+					OpenTime:      openTime,
+					UpdateTPLogic: dec.Reasoning,
+				}
+				if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
+					log.Printf("  ⚠ 更新交易记录的update_tp_logic失败: %v", err)
+				} else {
+					log.Printf("  ✓ 已更新交易记录的update_tp_logic")
+				}
+			}
+		}
+	}
 	
 	return nil
 }
@@ -2907,8 +2903,77 @@ func (at *AutoTrader) executeUpdateStopLoss(dec *decision.Decision, actionRecord
 			log.Printf("  ⚠ 保存后验证读取失败: 无法读取到保存的值")
 		}
 	}
+
+	// 更新交易记录的update_sl_logic字段
+	if at.storageAdapter != nil && dec.Reasoning != "" {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			// 获取开仓时间（从持仓信息或从已保存的交易记录中获取）
+			openTime := at.getOpenTimeForPosition(dec.Symbol, positionSide)
+			if !openTime.IsZero() {
+				dbTrade := &storage.TradeRecord{
+					Symbol:        dec.Symbol,
+					OpenTime:      openTime,
+					UpdateSLLogic: dec.Reasoning,
+				}
+				if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
+					log.Printf("  ⚠ 更新交易记录的update_sl_logic失败: %v", err)
+				} else {
+					log.Printf("  ✓ 已更新交易记录的update_sl_logic")
+				}
+			}
+		}
+	}
 	
 	return nil
+}
+
+// getOpenTimeForPosition 获取持仓的开仓时间
+func (at *AutoTrader) getOpenTimeForPosition(symbol, side string) time.Time {
+	// 方法1: 从已保存的交易记录中查找（优先查找未平仓交易）
+	if at.storageAdapter != nil {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			trade, err := tradeStorage.GetOpenTrade(symbol, side)
+			if err == nil && trade != nil {
+				return trade.OpenTime
+			}
+			
+			// 如果未平仓交易找不到，尝试查找最近已平仓的交易（用于update_sl/tp场景）
+			// 查询最近1天的交易，找到匹配symbol+side的最新交易
+			localTrades, err := tradeStorage.GetTradesBySymbol(symbol, 1)
+			if err == nil {
+				for _, t := range localTrades {
+					if t.Side == side {
+						// 返回最近一次交易的开仓时间（即使已平仓）
+						return t.OpenTime
+					}
+				}
+			}
+		}
+	}
+
+	// 方法2: 从positionFirstSeenTime获取
+	posKey := symbol + "_" + side
+	at.positionTimeMu.RLock()
+	defer at.positionTimeMu.RUnlock()
+	if ts, exists := at.positionFirstSeenTime[posKey]; exists {
+		return time.Unix(ts/1000, (ts%1000)*1000000)
+	}
+
+	// 方法3: 从持仓信息中获取（如果可能）
+	positions, err := at.trader.GetPositions()
+	if err == nil {
+		for _, pos := range positions {
+			if pos["symbol"] == symbol && pos["side"] == side {
+				// 尝试从持仓信息中获取开仓时间（如果有的话）
+				// 注意：币安API可能不提供开仓时间，这里返回零值
+				return time.Time{}
+			}
+		}
+	}
+
+	return time.Time{} // 未找到
 }
 
 // recordTradeHistory 记录交易历史（从决策记录中查找开仓信息）
@@ -3014,63 +3079,92 @@ func (at *AutoTrader) recordTradeHistory(side string, decision *decision.Decisio
 		return
 	}
 
-	// 获取平仓逻辑：优先使用平仓时的reasoning，如果没有则尝试从PositionLogicManager获取开仓时保存的exit_reasoning
-	closeReason := decision.Reasoning
-	if closeReason == "" && at.positionLogicManager != nil {
-		logic := at.positionLogicManager.GetLogic(decision.Symbol, side)
-		if logic != nil && logic.ExitLogic != nil {
-			// 从ExitLogic中提取文本描述
-			if logic.ExitLogic.Reasoning != "" {
-				closeReason = logic.ExitLogic.Reasoning
-			} else if len(logic.ExitLogic.Conditions) > 0 {
-				// 如果有条件但没有reasoning，尝试从条件中构建描述
-				closeReason = "根据开仓时规划的出场逻辑"
+	// 获取平仓逻辑：优先使用平仓时的reasoning（直接平仓的理由）
+	closeLogic := decision.Reasoning
+	
+	// 如果平仓时没有提供reasoning，从历史交易表读取开仓时保存的exit_logic
+	if closeLogic == "" && at.storageAdapter != nil {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			// 使用openAction.Timestamp查询交易记录（即使已平仓也能找到）
+			existingTrade, err := tradeStorage.GetOpenTradeByTime(decision.Symbol, openAction.Timestamp)
+			if err == nil && existingTrade != nil && existingTrade.ExitLogic != "" {
+				closeLogic = existingTrade.ExitLogic
 			}
 		}
 	}
-	if closeReason == "" {
-		closeReason = "未提供平仓逻辑"
+	
+	// 如果还是为空，使用默认值
+	if closeLogic == "" {
+		closeLogic = "未提供平仓逻辑"
 	}
 
-	// 构建交易记录
-	trade := at.buildTradeRecord(decision.Symbol, side, openAction, closeAction, openCycleNum, atomic.LoadInt64(&at.callCount), isForced, forcedReason, decision.Reasoning, closeReason)
+	// 构建交易记录用于计算盈亏等信息
+	trade := at.buildTradeRecord(decision.Symbol, side, openAction, closeAction, openCycleNum, atomic.LoadInt64(&at.callCount), isForced, forcedReason, decision.Reasoning, closeLogic)
 	
-	// 保存交易历史到数据库
+	// 更新交易历史到数据库（使用新的方式：直接更新已存在的交易记录）
 	if at.storageAdapter != nil {
 		tradeStorage := at.storageAdapter.GetTradeStorage()
 		if tradeStorage != nil {
-			// 转换logger.TradeRecord到storage.TradeRecord
+			// 直接更新交易记录，而不是创建新记录
+			closeTime := trade.CloseTime
 			dbTrade := &storage.TradeRecord{
-				TradeID:        trade.TradeID,
-				Symbol:         trade.Symbol,
-				Side:           trade.Side,
-				OpenTime:       trade.OpenTime,
-				OpenPrice:      trade.OpenPrice,
-				OpenQuantity:   trade.OpenQuantity,
-				OpenLeverage:   trade.OpenLeverage,
-				OpenOrderID:    trade.OpenOrderID,
-				OpenReason:     trade.OpenReason,
-				OpenCycleNum:   trade.OpenCycleNum,
-				CloseTime:      trade.CloseTime,
-				ClosePrice:     trade.ClosePrice,
-				CloseQuantity:  trade.CloseQuantity,
-				CloseOrderID:   trade.CloseOrderID,
-				CloseReason:    trade.CloseReason,
-				CloseCycleNum:  trade.CloseCycleNum,
-				IsForced:       trade.IsForced,
-				ForcedReason:   trade.ForcedReason,
-				Duration:       trade.Duration,
-				PositionValue:  trade.PositionValue,
-				MarginUsed:     trade.MarginUsed,
-				PnL:            trade.PnL,
-				PnLPct:         trade.PnLPct,
-				WasStopLoss:    trade.WasStopLoss,
-				Success:        trade.Success,
-				Error:          trade.Error,
+				Symbol:        decision.Symbol,
+				OpenTime:      openAction.Timestamp,
+				CloseTime:     &closeTime,
+				ClosePrice:    trade.ClosePrice,
+				CloseQuantity: trade.CloseQuantity,
+				CloseOrderID:  trade.CloseOrderID,
+				CloseReason:   closeLogic,
+				CloseCycleNum: int(atomic.LoadInt64(&at.callCount)),
+				IsForced:      isForced,
+				ForcedReason:  forcedReason,
+				Duration:      trade.Duration,
+				PnL:           trade.PnL,
+				PnLPct:        trade.PnLPct,
+				WasStopLoss:   trade.WasStopLoss,
+				Success:       trade.Success,
+				Error:         trade.Error,
+				CloseLogic:    closeLogic, // 直接平仓的理由
 			}
 
-			if err := tradeStorage.LogTrade(dbTrade); err != nil {
-				log.Printf("⚠️  保存交易历史到数据库失败: %v", err)
+			if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
+				log.Printf("⚠️  更新交易历史到数据库失败: %v，尝试使用LogTrade", err)
+				// 如果更新失败（可能是旧数据），尝试使用LogTrade（向后兼容）
+				dbTradeOld := &storage.TradeRecord{
+					TradeID:        trade.TradeID,
+					Symbol:         trade.Symbol,
+					Side:           trade.Side,
+					OpenTime:       trade.OpenTime,
+					OpenPrice:      trade.OpenPrice,
+					OpenQuantity:   trade.OpenQuantity,
+					OpenLeverage:   trade.OpenLeverage,
+					OpenOrderID:    trade.OpenOrderID,
+					OpenReason:     trade.OpenReason,
+					OpenCycleNum:   trade.OpenCycleNum,
+					CloseTime:      &closeTime,
+					ClosePrice:     trade.ClosePrice,
+					CloseQuantity:  trade.CloseQuantity,
+					CloseOrderID:   trade.CloseOrderID,
+					CloseReason:    closeLogic,
+					CloseCycleNum:  trade.CloseCycleNum,
+					IsForced:       trade.IsForced,
+					ForcedReason:   trade.ForcedReason,
+					Duration:       trade.Duration,
+					PositionValue:  trade.PositionValue,
+					MarginUsed:     trade.MarginUsed,
+					PnL:            trade.PnL,
+					PnLPct:         trade.PnLPct,
+					WasStopLoss:    trade.WasStopLoss,
+					Success:        trade.Success,
+					Error:          trade.Error,
+					CloseLogic:     closeLogic,
+				}
+				if err := tradeStorage.LogTrade(dbTradeOld); err != nil {
+					log.Printf("⚠️  保存交易历史到数据库失败: %v", err)
+				}
+			} else {
+				log.Printf("✓ 已更新交易记录的close_logic: %s", closeLogic)
 			}
 		}
 	}
@@ -3264,47 +3358,114 @@ func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeA
 		Success:   true,
 	}
 
-	// 构建交易记录
+	// 构建交易记录用于计算盈亏等信息
 	trade := at.buildTradeRecord(symbol, side, openAction, closeAction, 0, atomic.LoadInt64(&at.callCount), isForced, forcedReason, "系统外开仓", "")
 	
-	// 保存交易历史到数据库
+	// 更新交易历史到数据库（使用新的方式：直接更新已存在的交易记录）
 	if at.storageAdapter != nil {
 		tradeStorage := at.storageAdapter.GetTradeStorage()
 		if tradeStorage != nil {
-			// 转换logger.TradeRecord到storage.TradeRecord
-			dbTrade := &storage.TradeRecord{
-				TradeID:        trade.TradeID,
-				Symbol:         trade.Symbol,
-				Side:           trade.Side,
-				OpenTime:       trade.OpenTime,
-				OpenPrice:      trade.OpenPrice,
-				OpenQuantity:   trade.OpenQuantity,
-				OpenLeverage:   trade.OpenLeverage,
-				OpenOrderID:    trade.OpenOrderID,
-				OpenReason:     trade.OpenReason,
-				OpenCycleNum:   trade.OpenCycleNum,
-				CloseTime:      trade.CloseTime,
-				ClosePrice:     trade.ClosePrice,
-				CloseQuantity:  trade.CloseQuantity,
-				CloseOrderID:   trade.CloseOrderID,
-				CloseReason:    trade.CloseReason,
-				CloseCycleNum:  trade.CloseCycleNum,
-				IsForced:       trade.IsForced,
-				ForcedReason:   trade.ForcedReason,
-				Duration:       trade.Duration,
-				PositionValue:  trade.PositionValue,
-				MarginUsed:     trade.MarginUsed,
-				PnL:            trade.PnL,
-				PnLPct:         trade.PnLPct,
-				WasStopLoss:    trade.WasStopLoss,
-				Success:        trade.Success,
-				Error:          trade.Error,
-			}
+			// 优先尝试更新已存在的交易记录（如果是强制平仓）
+			if isForced && hasOpenTime {
+				closeTime := trade.CloseTime
+				dbTrade := &storage.TradeRecord{
+					Symbol:           symbol,
+					OpenTime:         openTime,
+					CloseTime:        &closeTime,
+					ClosePrice:       trade.ClosePrice,
+					CloseQuantity:    trade.CloseQuantity,
+					CloseOrderID:     trade.CloseOrderID,
+					CloseReason:      forcedReason,
+					CloseCycleNum:    int(atomic.LoadInt64(&at.callCount)),
+					IsForced:         isForced,
+					ForcedReason:     forcedReason,
+					Duration:         trade.Duration,
+					PnL:              trade.PnL,
+					PnLPct:           trade.PnLPct,
+					WasStopLoss:      trade.WasStopLoss,
+					Success:          trade.Success,
+					Error:            trade.Error,
+					ForcedCloseLogic: forcedReason, // 强制平仓逻辑
+				}
 
-			if err := tradeStorage.LogTrade(dbTrade); err != nil {
-				log.Printf("⚠️  保存交易历史到数据库失败: %v", err)
+				if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
+					log.Printf("⚠️  更新交易历史失败（可能是旧数据）: %v，尝试创建新记录", err)
+					// 如果更新失败，尝试创建新记录（向后兼容）
+					dbTradeOld := &storage.TradeRecord{
+						TradeID:         trade.TradeID,
+						Symbol:          trade.Symbol,
+						Side:            trade.Side,
+						OpenTime:        trade.OpenTime,
+						OpenPrice:       trade.OpenPrice,
+						OpenQuantity:    trade.OpenQuantity,
+						OpenLeverage:    trade.OpenLeverage,
+						OpenOrderID:     trade.OpenOrderID,
+						OpenReason:      trade.OpenReason,
+						OpenCycleNum:    trade.OpenCycleNum,
+						CloseTime:       &closeTime,
+						ClosePrice:      trade.ClosePrice,
+						CloseQuantity:   trade.CloseQuantity,
+						CloseOrderID:    trade.CloseOrderID,
+						CloseReason:     forcedReason,
+						CloseCycleNum:   trade.CloseCycleNum,
+						IsForced:        trade.IsForced,
+						ForcedReason:    trade.ForcedReason,
+						Duration:        trade.Duration,
+						PositionValue:   trade.PositionValue,
+						MarginUsed:      trade.MarginUsed,
+						PnL:             trade.PnL,
+						PnLPct:          trade.PnLPct,
+						WasStopLoss:     trade.WasStopLoss,
+						Success:         trade.Success,
+						Error:           trade.Error,
+						ForcedCloseLogic: forcedReason,
+					}
+					if err := tradeStorage.LogTrade(dbTradeOld); err != nil {
+						log.Printf("⚠️  保存交易历史到数据库失败: %v", err)
+					} else {
+						log.Printf("✅ 强制平仓交易历史已记录: %s %s, 盈亏: %.2f USDT (%.2f%%)", symbol, side, trade.PnL, trade.PnLPct)
+					}
+				} else {
+					log.Printf("✓ 已更新交易记录的forced_close_logic: %s", forcedReason)
+					log.Printf("✅ 强制平仓交易历史已更新: %s %s, 盈亏: %.2f USDT (%.2f%%)", symbol, side, trade.PnL, trade.PnLPct)
+				}
 			} else {
-				log.Printf("✅ 强制平仓交易历史已记录: %s %s, 盈亏: %.2f USDT (%.2f%%)", symbol, side, trade.PnL, trade.PnLPct)
+				// 非强制平仓或无法获取开仓时间，使用LogTrade创建新记录
+				closeTime := trade.CloseTime
+				dbTrade := &storage.TradeRecord{
+					TradeID:         trade.TradeID,
+					Symbol:          trade.Symbol,
+					Side:            trade.Side,
+					OpenTime:        trade.OpenTime,
+					OpenPrice:       trade.OpenPrice,
+					OpenQuantity:    trade.OpenQuantity,
+					OpenLeverage:    trade.OpenLeverage,
+					OpenOrderID:     trade.OpenOrderID,
+					OpenReason:      trade.OpenReason,
+					OpenCycleNum:    trade.OpenCycleNum,
+					CloseTime:       &closeTime,
+					ClosePrice:      trade.ClosePrice,
+					CloseQuantity:   trade.CloseQuantity,
+					CloseOrderID:    trade.CloseOrderID,
+					CloseReason:     trade.CloseReason,
+					CloseCycleNum:   trade.CloseCycleNum,
+					IsForced:        trade.IsForced,
+					ForcedReason:    trade.ForcedReason,
+					Duration:        trade.Duration,
+					PositionValue:   trade.PositionValue,
+					MarginUsed:      trade.MarginUsed,
+					PnL:             trade.PnL,
+					PnLPct:          trade.PnLPct,
+					WasStopLoss:     trade.WasStopLoss,
+					Success:         trade.Success,
+					Error:           trade.Error,
+					ForcedCloseLogic: forcedReason,
+				}
+				if err := tradeStorage.LogTrade(dbTrade); err != nil {
+					log.Printf("⚠️  保存交易历史到数据库失败: %v", err)
+				} else {
+					log.Printf("✅ 交易历史已记录: %s %s, 盈亏: %.2f USDT (%.2f%%)", symbol, side, trade.PnL, trade.PnLPct)
+				}
 			}
 		}
 	}
@@ -4209,63 +4370,84 @@ func (at *AutoTrader) SyncManualTradesFromExchange() error {
 			pnlPct = (calculatedPnL / marginUsed) * 100
 		}
 		
-		// 获取平仓逻辑：优先从决策记录中查找，然后从PositionLogicManager获取开仓时保存的exit_reasoning
-		closeReason := ""
-		
-		// 1. 尝试从决策记录中查找对应的平仓决策
+		// 检查本地是否已有该交易记录（使用symbol + openTime作为唯一键）
+		// 如果已存在，说明是系统内开仓的，应该更新而不是创建新记录
+		var existingTrade *storage.TradeRecord
 		if at.storageAdapter != nil {
-			decisionStorage := at.storageAdapter.GetDecisionStorage()
-			if decisionStorage != nil {
-				records, err := decisionStorage.GetLatestRecords(at.id, 100)
-				if err == nil {
-					// 查找平仓时间接近的决策记录（允许±5分钟误差）
-					timeWindow := 5 * time.Minute
-					for _, record := range records {
-						// 检查时间是否接近平仓时间
-						timeDiff := record.Timestamp.Sub(agg.lastTime)
-						if timeDiff < 0 {
-							timeDiff = -timeDiff
-						}
-						if timeDiff > timeWindow {
-							continue
-						}
-						
-						// 解析decisions字段
-						var decisions []decision.Decision
-						if err := json.Unmarshal(record.Decisions, &decisions); err != nil {
-							continue
-						}
-						
-						// 查找匹配的平仓决策
-						closeAction := fmt.Sprintf("close_%s", agg.tradeSide)
-						for _, dec := range decisions {
-							if dec.Action == closeAction && dec.Symbol == agg.symbol && dec.Reasoning != "" {
-								closeReason = dec.Reasoning
-								break
+			tradeStorage := at.storageAdapter.GetTradeStorage()
+			if tradeStorage != nil {
+				// 先尝试使用时间范围查询（即使交易已平仓也能找到）
+				existingTrade, _ = tradeStorage.GetOpenTradeByTime(agg.symbol, openTime)
+				
+				// 如果使用时间范围查询找不到，尝试从最近的交易中查找（匹配symbol+side，时间接近）
+				if existingTrade == nil {
+					localTrades, err := tradeStorage.GetTradesBySymbol(agg.symbol, 1) // 最近1天的交易
+					if err == nil {
+						for _, trade := range localTrades {
+							if trade.Side == agg.tradeSide {
+								// 检查开仓时间是否在平仓时间之前，且时间差在合理范围内（1小时内）
+								if trade.OpenTime.Before(agg.lastTime) && 
+								   trade.OpenTime.After(agg.lastTime.Add(-1*time.Hour)) &&
+								   trade.OpenTime.After(openTime.Add(-30*time.Second)) &&
+								   trade.OpenTime.Before(openTime.Add(30*time.Second)) {
+									existingTrade = trade
+									break
+								}
 							}
 						}
-						if closeReason != "" {
-							break
-						}
 					}
+				}
+				
+				if existingTrade != nil {
+					// 交易记录已存在，说明是系统内开仓的，应该更新平仓信息
+					// 获取平仓逻辑：优先使用已保存的exit_logic
+					closeReason := ""
+					if existingTrade.ExitLogic != "" {
+						closeReason = existingTrade.ExitLogic
+					} else {
+						closeReason = "手动平仓"
+					}
+					
+					// 使用找到的记录的OpenTime（确保匹配数据库中的精确时间）
+					actualOpenTime := existingTrade.OpenTime
+					
+					closeTimeVal := agg.lastTime
+					updateTrade := &storage.TradeRecord{
+						Symbol:         agg.symbol,
+						OpenTime:       actualOpenTime, // 使用数据库中的精确时间
+						CloseTime:      &closeTimeVal,
+						ClosePrice:     agg.weightedPrice,
+						CloseQuantity:  agg.totalQty,
+						CloseOrderID:   agg.orderId,
+						CloseReason:    closeReason,
+						CloseCycleNum:  int(atomic.LoadInt64(&at.callCount)),
+						IsForced:       false,
+						ForcedReason:   "",
+						Duration:       duration.String(),
+						PnL:            calculatedPnL,
+						PnLPct:         pnlPct,
+						WasStopLoss:    false,
+						Success:        true,
+						Error:          "",
+						CloseLogic:     closeReason, // 使用exit_logic作为close_logic
+					}
+					
+					if err := tradeStorage.UpdateTrade(updateTrade); err != nil {
+						log.Printf("⚠️  更新交易记录失败: %v, ID: %s", err, existingTrade.TradeID)
+					} else {
+						log.Printf("✅ 已更新交易记录（从交易所同步平仓信息）: %s - %s, 盈亏: %.2f USDT (%.2f%%)", 
+							agg.symbol, agg.tradeSide, calculatedPnL, pnlPct)
+					}
+					continue // 跳过创建新记录，因为已经更新了
 				}
 			}
 		}
 		
-		// 2. 如果从决策记录中找不到，尝试从PositionLogicManager获取开仓时保存的exit_reasoning
-		if closeReason == "" && at.positionLogicManager != nil {
-			logic := at.positionLogicManager.GetLogic(agg.symbol, agg.tradeSide)
-			if logic != nil && logic.ExitLogic != nil && logic.ExitLogic.Reasoning != "" {
-				closeReason = logic.ExitLogic.Reasoning
-			}
-		}
+		// 如果本地没有该交易记录，说明是系统外开仓的，创建新记录
+		// 获取平仓逻辑：使用默认值（系统外开仓没有exit_logic）
+		closeReason := "手动平仓"
 		
-		// 3. 如果都没有，使用"手动平仓"作为默认值
-		if closeReason == "" {
-			closeReason = "手动平仓"
-		}
-		
-		// 创建完整的交易记录（使用聚合后的数据）
+		closeTimeVal := agg.lastTime
 		tradeRecord := &storage.TradeRecord{
 			TradeID:        tradeId,
 			Symbol:         agg.symbol,
@@ -4277,7 +4459,7 @@ func (at *AutoTrader) SyncManualTradesFromExchange() error {
 			OpenOrderID:    openOrderID,
 			OpenReason:     "系统外开仓",
 			OpenCycleNum:   0,
-			CloseTime:      agg.lastTime, // 使用最后成交时间
+			CloseTime:      &closeTimeVal, // 使用最后成交时间
 			ClosePrice:     agg.weightedPrice, // 使用加权平均价格
 			CloseQuantity:  agg.totalQty, // 使用总数量
 			CloseOrderID:   agg.orderId,

@@ -243,6 +243,10 @@ func (at *AutoTrader) analyzePerformanceFromTrades(trades []*storage.TradeRecord
 			log.Printf("⚠️  跳过无效交易记录：缺少币种或方向信息")
 			continue
 		}
+		// 只处理已平仓的交易（未平仓的记录CloseTime为nil）
+		if trade.CloseTime == nil {
+			continue // 跳过未平仓的交易
+		}
 		if trade.OpenPrice <= 0 || trade.ClosePrice <= 0 {
 			log.Printf("⚠️  跳过无效交易记录 %s: 开仓价 %.4f 或平仓价 %.4f 无效", trade.Symbol, trade.OpenPrice, trade.ClosePrice)
 			continue
@@ -254,7 +258,29 @@ func (at *AutoTrader) analyzePerformanceFromTrades(trades []*storage.TradeRecord
 
 		// 转换为TradeOutcome
 		// 重新计算持仓时长，避免使用数据库中可能错误的Duration字段
-		duration := trade.CloseTime.Sub(trade.OpenTime)
+		var duration time.Duration
+		if trade.CloseTime != nil {
+			duration = trade.CloseTime.Sub(trade.OpenTime)
+		}
+		
+		// 按照优先级获取平仓逻辑：直接平仓的理由 -> 强制平仓的理由 -> 进场时规划的出场逻辑 -> 默认理由
+		closeReason := ""
+		if trade.CloseLogic != "" {
+			closeReason = trade.CloseLogic // 优先使用直接平仓的理由
+		} else if trade.ForcedCloseLogic != "" {
+			closeReason = trade.ForcedCloseLogic // 其次是强制平仓的理由
+		} else if trade.ExitLogic != "" {
+			closeReason = trade.ExitLogic // 然后是进场时规划的出场逻辑
+		} else if trade.CloseReason != "" {
+			closeReason = trade.CloseReason // 最后使用旧的CloseReason字段（向后兼容）
+		} else {
+			closeReason = "未提供平仓逻辑" // 默认理由
+		}
+		
+		var closeTime time.Time
+		if trade.CloseTime != nil {
+			closeTime = *trade.CloseTime
+		}
 		
 		outcome := logger.TradeOutcome{
 			Symbol:        trade.Symbol,
@@ -269,9 +295,9 @@ func (at *AutoTrader) analyzePerformanceFromTrades(trades []*storage.TradeRecord
 			PnLPct:        trade.PnLPct,
 			Duration:      duration.String(),
 			OpenTime:      trade.OpenTime,
-			CloseTime:     trade.CloseTime,
+			CloseTime:     closeTime,
 			WasStopLoss:   trade.WasStopLoss,
-			CloseReason:   trade.CloseReason, // 平仓原因（平仓逻辑）
+			CloseReason:   closeReason, // 使用优先级确定的平仓逻辑
 		}
 
 		analysis.RecentTrades = append(analysis.RecentTrades, outcome)

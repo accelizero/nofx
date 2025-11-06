@@ -362,9 +362,10 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 	if ctx.Account.TotalEquity > 0 {
 		availablePct = (ctx.Account.AvailableBalance / ctx.Account.TotalEquity) * 100
 	}
-	sb.WriteString(fmt.Sprintf("**账户**: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%+.2f%% | 保证金%.1f%% | 持仓%d个\n\n",
+	// 盈亏显示格式：盈亏=-1.08 (-0.59%)
+	sb.WriteString(fmt.Sprintf("**账户**: 净值%.2f | 余额%.2f (%.1f%%) | 盈亏%.2f (%.2f%%) | 保证金%.1f%% | 持仓%d个\n\n",
 		ctx.Account.TotalEquity, ctx.Account.AvailableBalance, availablePct,
-		ctx.Account.TotalPnLPct, ctx.Account.MarginUsedPct, ctx.Account.PositionCount))
+		ctx.Account.TotalPnL, ctx.Account.TotalPnLPct, ctx.Account.MarginUsedPct, ctx.Account.PositionCount))
 	
 	// 当前持仓 - 多时间框架分析
 	if len(ctx.Positions) > 0 {
@@ -383,26 +384,20 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 				}
 			}
 			
-			// 计算本币盈亏百分比（不乘以杠杆），用于AI判断
-			// 因为进场出场逻辑都是基于本币盈亏的
-			baseCoinPnLPct := 0.0
-			if pos.Side == "long" {
-				baseCoinPnLPct = ((pos.MarkPrice - pos.EntryPrice) / pos.EntryPrice) * 100
-			} else {
-				baseCoinPnLPct = ((pos.EntryPrice - pos.MarkPrice) / pos.EntryPrice) * 100
-			}
-			
-			sb.WriteString(fmt.Sprintf("%d. %s %s | 入场价%.4f 当前价%.4f | 盈亏%+.2f%% (本币) | 杠杆%dx | 保证金%.0f | 强平价%.4f%s\n",
+			// 使用交易所API返回的未实现盈亏（最准确）
+			// UnrealizedPnL是盈亏金额（USDT），UnrealizedPnLPct是盈亏百分比（杠杆后）
+			// 格式：盈亏=-1.08 (-0.59%)
+			sb.WriteString(fmt.Sprintf("%d. %s %s | 入场价%.4f 当前价%.4f | 杠杆%dx | 盈亏%.2f (%.2f%%) | 保证金%.0f | 强平价%.4f%s\n",
 				i+1, pos.Symbol, strings.ToUpper(pos.Side),
-				pos.EntryPrice, pos.MarkPrice, baseCoinPnLPct,
-				pos.Leverage, pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
+				pos.EntryPrice, pos.MarkPrice, pos.Leverage, pos.UnrealizedPnL, pos.UnrealizedPnLPct,
+				pos.MarginUsed, pos.LiquidationPrice, holdingDuration))
 			
-			// 添加多时间框架评分
-			if score, exists := result.SymbolScores[pos.Symbol]; exists {
-				sb.WriteString(fmt.Sprintf("   **多时间框架评分**: 做多%.2f | 做空%.2f | 推荐方向:%s | 一致性%.2f\n",
-					score.LongScore.WeightedScore, score.ShortScore.WeightedScore,
-					score.RecommendedDirection, score.ConsistencyScore))
-			}
+			// 注释掉评分信息，让AI自己判断
+			// if score, exists := result.SymbolScores[pos.Symbol]; exists {
+			// 	sb.WriteString(fmt.Sprintf("   **多时间框架评分**: 做多%.2f | 做空%.2f | 推荐方向:%s\n",
+			// 		score.LongScore.WeightedScore, score.ShortScore.WeightedScore,
+			// 		score.RecommendedDirection))
+			// }
 			sb.WriteString("\n")
 			
 			// 显示当前设置的止损/止盈价格（始终显示，让AI知道当前状态）
@@ -478,15 +473,23 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 	sb.WriteString(fmt.Sprintf("## 🎯 候选币种（按多时间框架评分排序，共%d个）\n\n", len(result.SortedSymbols)))
 	
 	for i, symbol := range result.SortedSymbols {
-		score := result.SymbolScores[symbol]
+		// 注释掉评分信息，让AI自己判断
+		// score := result.SymbolScores[symbol]
 		data := result.DataMap[symbol]
 		
 		sb.WriteString(fmt.Sprintf("### %d. %s\n\n", i+1, symbol))
 		
-		// 评分信息
-		sb.WriteString(fmt.Sprintf("**评分**: 做多%.2f | 做空%.2f | 推荐方向: **%s** | 一致性%.2f\n\n",
-			score.LongScore.WeightedScore, score.ShortScore.WeightedScore,
-			strings.ToUpper(score.RecommendedDirection), score.ConsistencyScore))
+		// 根据币种类型确定杠杆倍数
+		leverage := ctx.AltcoinLeverage
+		if symbol == "BTCUSDT" || symbol == "ETHUSDT" {
+			leverage = ctx.BTCETHLeverage
+		}
+		sb.WriteString(fmt.Sprintf("**杠杆倍数**：%d\n\n", leverage))
+		
+		// 注释掉评分信息，让AI自己判断
+		// sb.WriteString(fmt.Sprintf("**评分**: 做多%.2f | 做空%.2f | 推荐方向: **%s**\n\n",
+		// 	score.LongScore.WeightedScore, score.ShortScore.WeightedScore,
+		// 	strings.ToUpper(score.RecommendedDirection)))
 		
 		// 各时间框架详细数据（包含完整的序列数据：DIF、DEA、HIST、成交量等）
 		sb.WriteString("**多时间框架数据**:\n\n")
@@ -536,19 +539,26 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 			
 			// 1. 总体统计
 			sb.WriteString("### 📊 总体表现\n\n")
-			sb.WriteString(fmt.Sprintf("- **总交易数**: %d\n", perf.TotalTrades))
-			sb.WriteString(fmt.Sprintf("- **盈利交易**: %d\n", perf.WinningTrades))
-			sb.WriteString(fmt.Sprintf("- **亏损交易**: %d\n", perf.LosingTrades))
-			sb.WriteString(fmt.Sprintf("- **胜率**: %.1f%%\n", perf.WinRate))
-			sb.WriteString(fmt.Sprintf("- **平均盈利**: %.2f USDT\n", perf.AvgWin))
-			sb.WriteString(fmt.Sprintf("- **平均亏损**: %.2f USDT\n", perf.AvgLoss))
-			sb.WriteString(fmt.Sprintf("- **盈亏比**: %.2f\n", perf.ProfitFactor))
-			sb.WriteString(fmt.Sprintf("- **夏普比率**: %.2f\n\n", perf.SharpeRatio))
+			if perf.TotalTrades > 0 {
+				sb.WriteString(fmt.Sprintf("- **总交易数**: %d\n", perf.TotalTrades))
+				sb.WriteString(fmt.Sprintf("- **盈利交易**: %d\n", perf.WinningTrades))
+				sb.WriteString(fmt.Sprintf("- **亏损交易**: %d\n", perf.LosingTrades))
+				sb.WriteString(fmt.Sprintf("- **胜率**: %.1f%%\n", perf.WinRate))
+				sb.WriteString(fmt.Sprintf("- **平均盈利**: %.2f USDT\n", perf.AvgWin))
+				sb.WriteString(fmt.Sprintf("- **平均亏损**: %.2f USDT\n", perf.AvgLoss))
+				sb.WriteString(fmt.Sprintf("- **盈亏比**: %.2f\n", perf.ProfitFactor))
+				sb.WriteString(fmt.Sprintf("- **夏普比率**: %.2f\n\n", perf.SharpeRatio))
+			} else {
+				sb.WriteString("- **总交易数**: 0（暂无已完成的历史交易记录）\n\n")
+			}
 			
-			// 2. 各币种详细统计（用于根据胜率优化仓位大小）
-			if len(perf.SymbolStats) > 0 {
-				sb.WriteString("### 📈 各币种表现统计（用于仓位优化）\n\n")
-				sb.WriteString("**根据胜率优化仓位大小**：表现好的币种可以适当增加仓位，表现差的币种应该减少或避免交易。\n\n")
+			// 2. 各币种详细统计（只显示候选币种的统计，用于根据胜率优化仓位大小）
+			if len(perf.SymbolStats) > 0 && len(ctx.CandidateCoins) > 0 {
+				// 构建候选币种集合
+				candidateSymbols := make(map[string]bool)
+				for _, coin := range ctx.CandidateCoins {
+					candidateSymbols[coin.Symbol] = true
+				}
 				
 				// 按总盈亏排序
 				type SymbolStat struct {
@@ -557,76 +567,60 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 				}
 				var sortedStats []SymbolStat
 				for symbol, stats := range perf.SymbolStats {
-					if stats.TotalTrades > 0 {
+					// 只包含候选币种的统计
+					if candidateSymbols[symbol] && stats.TotalTrades > 0 {
 						sortedStats = append(sortedStats, SymbolStat{Symbol: symbol, Stats: stats})
 					}
 				}
 				
-				// 简单排序（按总盈亏降序）
-				for i := 0; i < len(sortedStats)-1; i++ {
-					for j := i + 1; j < len(sortedStats); j++ {
-						if sortedStats[i].Stats.TotalPnL < sortedStats[j].Stats.TotalPnL {
-							sortedStats[i], sortedStats[j] = sortedStats[j], sortedStats[i]
+				if len(sortedStats) > 0 {
+					sb.WriteString("### 📈 各币种表现统计（仅候选币种，用于仓位优化）\n\n")
+					sb.WriteString("**根据胜率优化仓位大小**：表现好的币种可以适当增加仓位，表现差的币种应该减少或避免交易。\n\n")
+					
+					// 简单排序（按总盈亏降序）
+					for i := 0; i < len(sortedStats)-1; i++ {
+						for j := i + 1; j < len(sortedStats); j++ {
+							if sortedStats[i].Stats.TotalPnL < sortedStats[j].Stats.TotalPnL {
+								sortedStats[i], sortedStats[j] = sortedStats[j], sortedStats[i]
+							}
 						}
 					}
+					
+					// 显示所有候选币种（不再限制为10个）
+					for i := 0; i < len(sortedStats); i++ {
+						stat := sortedStats[i]
+						sb.WriteString(fmt.Sprintf("- **%s**: 交易%d次, 胜率%.1f%%, 总盈亏%.2f USDT, 平均%.2f USDT/笔\n",
+							stat.Symbol, stat.Stats.TotalTrades, stat.Stats.WinRate, stat.Stats.TotalPnL, stat.Stats.AvgPnL))
+					}
+					sb.WriteString("\n")
 				}
-				
-				// 显示前10个币种
-				displayCount := len(sortedStats)
-				if displayCount > 10 {
-					displayCount = 10
-				}
-				for i := 0; i < displayCount; i++ {
-					stat := sortedStats[i]
-					sb.WriteString(fmt.Sprintf("- **%s**: 交易%d次, 胜率%.1f%%, 总盈亏%.2f USDT, 平均%.2f USDT/笔\n",
-						stat.Symbol, stat.Stats.TotalTrades, stat.Stats.WinRate, stat.Stats.TotalPnL, stat.Stats.AvgPnL))
-				}
-				sb.WriteString("\n")
 			}
 			
-			// 3. 最近交易记录（只显示候选币种的最新一条）
-			if len(perf.RecentTrades) > 0 && len(ctx.CandidateCoins) > 0 {
-				// 构建候选币种集合
-				candidateSymbols := make(map[string]bool)
-				for _, coin := range ctx.CandidateCoins {
-					candidateSymbols[coin.Symbol] = true
-				}
+			// 3. 最近交易记录（显示最近5条，不限币种）
+			if len(perf.RecentTrades) > 0 {
+				// 按CloseTime降序排序（最新的在前）
+				sortedTrades := make([]logger.TradeOutcome, len(perf.RecentTrades))
+				copy(sortedTrades, perf.RecentTrades)
 				
-				// 为每个候选币种找到最新的一条交易记录
-				latestTradeBySymbol := make(map[string]logger.TradeOutcome)
-				for _, trade := range perf.RecentTrades {
-					if candidateSymbols[trade.Symbol] {
-						// 如果该币种还没有记录，或者当前交易更新，则更新
-						existing, exists := latestTradeBySymbol[trade.Symbol]
-						if !exists || trade.CloseTime.After(existing.CloseTime) {
-							latestTradeBySymbol[trade.Symbol] = trade
-						}
-					}
-				}
-				
-				// 按平仓时间排序（最新的在前）
-				type TradeWithSymbol struct {
-					Symbol string
-					Trade  logger.TradeOutcome
-				}
-				var sortedTrades []TradeWithSymbol
-				for symbol, trade := range latestTradeBySymbol {
-					sortedTrades = append(sortedTrades, TradeWithSymbol{Symbol: symbol, Trade: trade})
-				}
-				
-				// 按CloseTime降序排序
+				// 简单排序（按CloseTime降序）
 				for i := 0; i < len(sortedTrades)-1; i++ {
 					for j := i + 1; j < len(sortedTrades); j++ {
-						if sortedTrades[i].Trade.CloseTime.Before(sortedTrades[j].Trade.CloseTime) {
+						if sortedTrades[i].CloseTime.Before(sortedTrades[j].CloseTime) {
 							sortedTrades[i], sortedTrades[j] = sortedTrades[j], sortedTrades[i]
 						}
 					}
 				}
 				
-				if len(sortedTrades) > 0 {
-					sb.WriteString("### 📝 最近交易记录（每个币种最新一条）\n\n")
-					for i, item := range sortedTrades {
-						trade := item.Trade
+				// 只取前5条
+				displayCount := len(sortedTrades)
+				if displayCount > 5 {
+					displayCount = 5
+				}
+				
+				if displayCount > 0 {
+					sb.WriteString("### 📝 最近交易记录（最近5条）\n\n")
+					for i := 0; i < displayCount; i++ {
+						trade := sortedTrades[i]
 						pnlSign := "+"
 						if trade.PnL < 0 {
 							pnlSign = ""
@@ -675,59 +669,48 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 			if jsonData, err := json.Marshal(ctx.Performance); err == nil {
 				if err := json.Unmarshal(jsonData, &perfData); err == nil {
 					sb.WriteString("## 📚 历史表现分析（AI学习数据）\n\n")
-					sb.WriteString(fmt.Sprintf("- **总交易数**: %d\n", perfData.TotalTrades))
-					sb.WriteString(fmt.Sprintf("- **胜率**: %.1f%%\n", perfData.WinRate))
-					sb.WriteString(fmt.Sprintf("- **夏普比率**: %.2f\n\n", perfData.SharpeRatio))
-					if perfData.BestSymbol != "" {
-						sb.WriteString(fmt.Sprintf("**表现最好**: %s\n", perfData.BestSymbol))
-					}
-					if perfData.WorstSymbol != "" {
-						sb.WriteString(fmt.Sprintf("**表现最差**: %s\n", perfData.WorstSymbol))
+					
+					// 1. 总体统计
+					sb.WriteString("### 📊 总体表现\n\n")
+					if perfData.TotalTrades > 0 {
+						sb.WriteString(fmt.Sprintf("- **总交易数**: %d\n", perfData.TotalTrades))
+						sb.WriteString(fmt.Sprintf("- **胜率**: %.1f%%\n", perfData.WinRate))
+						sb.WriteString(fmt.Sprintf("- **夏普比率**: %.2f\n\n", perfData.SharpeRatio))
+						if perfData.BestSymbol != "" {
+							sb.WriteString(fmt.Sprintf("**表现最好**: %s\n", perfData.BestSymbol))
+						}
+						if perfData.WorstSymbol != "" {
+							sb.WriteString(fmt.Sprintf("**表现最差**: %s\n", perfData.WorstSymbol))
+						}
+					} else {
+						sb.WriteString("- **总交易数**: 0（暂无已完成的历史交易记录）\n\n")
 					}
 					
-					// 最近交易记录（只显示候选币种的最新一条）
-					if len(perfData.RecentTrades) > 0 && len(ctx.CandidateCoins) > 0 {
-						// 构建候选币种集合
-						candidateSymbols := make(map[string]bool)
-						for _, coin := range ctx.CandidateCoins {
-							candidateSymbols[coin.Symbol] = true
-						}
+					// 最近交易记录（显示最近5条，不限币种）
+					if len(perfData.RecentTrades) > 0 {
+						// 按CloseTime降序排序（最新的在前）
+						sortedTrades := make([]logger.TradeOutcome, len(perfData.RecentTrades))
+						copy(sortedTrades, perfData.RecentTrades)
 						
-						// 为每个候选币种找到最新的一条交易记录
-						latestTradeBySymbol := make(map[string]logger.TradeOutcome)
-						for _, trade := range perfData.RecentTrades {
-							if candidateSymbols[trade.Symbol] {
-								// 如果该币种还没有记录，或者当前交易更新，则更新
-								existing, exists := latestTradeBySymbol[trade.Symbol]
-								if !exists || trade.CloseTime.After(existing.CloseTime) {
-									latestTradeBySymbol[trade.Symbol] = trade
-								}
-							}
-						}
-						
-						// 按平仓时间排序（最新的在前）
-						type TradeWithSymbol struct {
-							Symbol string
-							Trade  logger.TradeOutcome
-						}
-						var sortedTrades []TradeWithSymbol
-						for symbol, trade := range latestTradeBySymbol {
-							sortedTrades = append(sortedTrades, TradeWithSymbol{Symbol: symbol, Trade: trade})
-						}
-						
-						// 按CloseTime降序排序
+						// 简单排序（按CloseTime降序）
 						for i := 0; i < len(sortedTrades)-1; i++ {
 							for j := i + 1; j < len(sortedTrades); j++ {
-								if sortedTrades[i].Trade.CloseTime.Before(sortedTrades[j].Trade.CloseTime) {
+								if sortedTrades[i].CloseTime.Before(sortedTrades[j].CloseTime) {
 									sortedTrades[i], sortedTrades[j] = sortedTrades[j], sortedTrades[i]
 								}
 							}
 						}
 						
-						if len(sortedTrades) > 0 {
-							sb.WriteString("\n### 📝 候选币种最近交易记录（每个币种最新一条）\n\n")
-							for i, item := range sortedTrades {
-								trade := item.Trade
+						// 只取前5条
+						displayCount := len(sortedTrades)
+						if displayCount > 5 {
+							displayCount = 5
+						}
+						
+						if displayCount > 0 {
+							sb.WriteString("\n### 📝 最近交易记录（最近5条）\n\n")
+							for i := 0; i < displayCount; i++ {
+								trade := sortedTrades[i]
 								pnlSign := "+"
 								if trade.PnL < 0 {
 									pnlSign = ""
@@ -750,6 +733,13 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 							}
 							sb.WriteString("\n")
 						}
+					}
+					
+					// 策略建议应该从策略文件中读取，而不是硬编码
+					// 这里只显示当前夏普比率，让AI根据策略文件中的指导自行判断
+					if perfData.TotalTrades > 0 {
+						sb.WriteString("### 🎯 当前表现指标\n\n")
+						sb.WriteString(fmt.Sprintf("**当前夏普比率**: %.2f\n\n", perfData.SharpeRatio))
 					}
 					
 					log.Printf("📊 通过JSON解析获取Performance数据，最近交易记录=%d条", len(perfData.RecentTrades))
@@ -775,7 +765,10 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 	
 	sb.WriteString("---\n\n")
 	sb.WriteString("请基于多时间框架分析结果输出决策（思维链 + JSON）\n")
-	sb.WriteString("**注意**: 评分系统已为您分析出推荐方向（做多/做空），请结合一致性评分和详细数据进行决策。\n")
+	// 注释掉一致性评分的提示，让AI自己判断
+	// 已注释：去掉评分系统推荐方向的提示，让AI完全基于数据自行判断
+	// sb.WriteString("**注意**: 评分系统已为您分析出推荐方向（做多/做空），请结合详细数据进行决策。\n")
+	// sb.WriteString("**注意**: 评分系统已为您分析出推荐方向（做多/做空），请结合一致性评分和详细数据进行决策。\n")
 	
 	return sb.String(), nil
 }
