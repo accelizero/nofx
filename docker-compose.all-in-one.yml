@@ -1,0 +1,26 @@
+version: '3.8'
+
+services:
+  # All-in-One service (Backend + Frontend + Nginx + Supervisor)
+  nofx-all:
+    build:
+      context: .
+      dockerfile: ./docker/Dockerfile.all-in-one
+    container_name: nofx-all-in-one
+    restart: unless-stopped
+    ports:
+      - "${NOFX_PORT:-80}:80"
+    volumes:
+      - ./backend/config.toml:/app/config.toml:ro
+      - ./backend/data:/app/data
+      - ./decision_logs:/app/decision_logs
+      - /etc/localtime:/etc/localtime:ro  # Sync host time
+    environment:
+      - TZ=${NOFX_TIMEZONE:-Asia/Shanghai}  # Set timezone
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+

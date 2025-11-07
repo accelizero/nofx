@@ -11,7 +11,8 @@ services:
     ports:
       - "${NOFX_BACKEND_PORT:-8080}:8080"
     volumes:
-      - ./config.json:/app/config.json:ro
+      - ./backend/config.toml:/app/config.toml:ro
+      - ./backend/data:/app/data
       - ./decision_logs:/app/decision_logs
       - /etc/localtime:/etc/localtime:ro  # Sync host time
     environment:
@@ -19,7 +20,7 @@ services:
     networks:
       - nofx-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
       interval: 30s
       timeout: 10s
       retries: 3

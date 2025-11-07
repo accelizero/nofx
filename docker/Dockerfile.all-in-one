@@ -1,17 +1,15 @@
-# docker/backend/Dockerfile
-
 # ═══════════════════════════════════════════════════════════════
-# NOFX Backend Dockerfile (Go + TA-Lib)
-# Multi-stage build with shared TA-Lib compilation stage
-# Versions extracted as ARGs for maintainability
+# NOFX All-in-One Dockerfile
+# 单一镜像包含：Backend (Go) + Frontend (React) + Nginx + Supervisor
 # ═══════════════════════════════════════════════════════════════
 
 ARG GO_VERSION=1.25-alpine
+ARG NODE_VERSION=20-alpine
 ARG ALPINE_VERSION=latest
 ARG TA_LIB_VERSION=0.4.0
 
 # ──────────────────────────────────────────────────────────────
-# TA-Lib Build Stage (shared across builds)
+# Stage 1: TA-Lib Builder
 # ──────────────────────────────────────────────────────────────
 FROM alpine:${ALPINE_VERSION} AS ta-lib-builder
 ARG TA_LIB_VERSION
@@ -34,7 +32,7 @@ RUN wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-${TA_LIB_VERSION}-src.
     cd .. && rm -rf ta-lib ta-lib-${TA_LIB_VERSION}-src.tar.gz
 
 # ──────────────────────────────────────────────────────────────
-# Backend Build Stage (Go Application)
+# Stage 2: Backend Builder (Go Application)
 # ──────────────────────────────────────────────────────────────
 FROM golang:${GO_VERSION} AS backend-builder
 
@@ -50,19 +48,63 @@ COPY backend/ .
 RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o nofx .
 
 # ──────────────────────────────────────────────────────────────
-# Runtime Stage (Minimal Executable Environment)
+# Stage 3: Frontend Builder (React/Vite Application)
+# ──────────────────────────────────────────────────────────────
+FROM node:${NODE_VERSION} AS frontend-builder
+WORKDIR /build
+
+COPY frontend/package*.json ./
+RUN npm ci
+
+COPY frontend/ ./
+RUN npm run build
+
+# ──────────────────────────────────────────────────────────────
+# Stage 4: Runtime (All-in-One)
 # ──────────────────────────────────────────────────────────────
 FROM alpine:${ALPINE_VERSION}
 
-RUN apk update && apk add --no-cache ca-certificates tzdata wget curl
+# 安装运行时依赖
+RUN apk update && apk add --no-cache \
+    ca-certificates \
+    tzdata \
+    nginx \
+    supervisor \
+    wget \
+    curl \
+    && rm -rf /var/cache/apk/*
 
+# 复制 TA-Lib
 COPY --from=ta-lib-builder /usr/local /usr/local
+
+# 复制 Backend 二进制文件
 WORKDIR /app
-COPY --from=backend-builder /app/nofx .
+COPY --from=backend-builder /app/nofx /app/nofx
+RUN chmod +x /app/nofx
 
-EXPOSE 8080
+# 复制 Frontend 静态文件
+COPY --from=frontend-builder /build/dist /usr/share/nginx/html
 
+# 复制 Nginx 配置
+COPY docker/nginx-all-in-one.conf /etc/nginx/conf.d/default.conf
+
+# 复制 Supervisor 配置
+COPY docker/supervisord.conf /etc/supervisord.conf
+
+# 创建必要的目录
+RUN mkdir -p /var/log/supervisor \
+    /var/log/nginx \
+    /app/data \
+    /app/decision_logs \
+    && chmod -R 755 /app
+
+# 暴露端口
+EXPOSE 80
+
+# 健康检查
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://localhost:8080/health || exit 1
+  CMD wget --no-verbose --tries=1 --spider http://localhost/health || exit 1
 
-CMD ["./nofx"]
+# 使用 Supervisor 作为主进程
+CMD ["/usr/bin/supervisord", "-c", "/etc/supervisord.conf"]
+
