@@ -141,6 +141,10 @@ func (at *AutoTrader) analyzePerformanceFromDB(records []*storage.DecisionRecord
 					CloseTime:     action.Timestamp,
 					WasStopLoss:   action.IsForced && pnl < 0,
 					CloseReason:   "", // 从DecisionRecord构建时，CloseReason需要从其他地方获取
+					EntryLogic:    "", // 从DecisionRecord构建时，EntryLogic需要从其他地方获取
+					ExitLogic:     "", // 从DecisionRecord构建时，ExitLogic需要从其他地方获取
+					CloseLogic:    "", // 从DecisionRecord构建时，CloseLogic需要从其他地方获取
+					ForcedCloseLogic: "", // 从DecisionRecord构建时，ForcedCloseLogic需要从其他地方获取
 				}
 
 				analysis.RecentTrades = append(analysis.RecentTrades, outcome)
@@ -305,6 +309,10 @@ func (at *AutoTrader) analyzePerformanceFromTrades(trades []*storage.TradeRecord
 			CloseTime:     closeTime,
 			WasStopLoss:   trade.WasStopLoss,
 			CloseReason:   closeReason, // 使用优先级确定的平仓逻辑
+			EntryLogic:    trade.EntryLogic,        // 进场逻辑
+			ExitLogic:     trade.ExitLogic,         // 出场逻辑（开仓时规划的）
+			CloseLogic:    trade.CloseLogic,        // 平仓逻辑（直接平仓的理由）
+			ForcedCloseLogic: trade.ForcedCloseLogic, // 强制平仓逻辑
 		}
 
 		analysis.RecentTrades = append(analysis.RecentTrades, outcome)

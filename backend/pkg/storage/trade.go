@@ -74,8 +74,7 @@ func (s *TradeStorage) initTable() error {
 		close_logic TEXT,
 		forced_close_logic TEXT,
 		created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-		UNIQUE(symbol, open_time)
+		updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
 	);
 	
 	CREATE INDEX IF NOT EXISTS idx_symbol ON trades(symbol);
@@ -332,11 +331,43 @@ func (s *TradeStorage) UpdateTrade(trade *TradeRecord) error {
 		return nil
 	}
 
+	// 优先使用trade_id更新（如果提供了）
+	if trade.TradeID != "" {
+		query := fmt.Sprintf(
+			"UPDATE trades SET %s WHERE trade_id = ?",
+			strings.Join(updates, ", "),
+		)
+		args = append(args, trade.TradeID)
+
+		result, err := s.db.Exec(query, args...)
+		if err != nil {
+			return fmt.Errorf("更新交易记录失败: %w", err)
+		}
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			return fmt.Errorf("获取更新影响行数失败: %w", err)
+		}
+
+		if rowsAffected == 0 {
+			return fmt.Errorf("交易记录不存在: trade_id=%s", trade.TradeID)
+		}
+
+		return nil
+	}
+
+	// 如果没有trade_id，统一使用该币种该方向未平仓的最新记录进行更新
+	// 一个币种同一时间只有一个仓位，所以应该能找到
+	if trade.Side == "" {
+		return fmt.Errorf("更新交易记录失败: 必须提供side字段")
+	}
+
+	// 使用子查询找到该币种该方向未平仓的最新记录（按open_time DESC排序）
 	query := fmt.Sprintf(
-		"UPDATE trades SET %s WHERE symbol = ? AND open_time = ?",
+		"UPDATE trades SET %s WHERE trade_id = (SELECT trade_id FROM trades WHERE symbol = ? AND side = ? AND close_time IS NULL ORDER BY open_time DESC LIMIT 1)",
 		strings.Join(updates, ", "),
 	)
-	args = append(args, trade.Symbol, trade.OpenTime)
+	args = append(args, trade.Symbol, trade.Side)
 
 	result, err := s.db.Exec(query, args...)
 	if err != nil {
@@ -350,7 +381,7 @@ func (s *TradeStorage) UpdateTrade(trade *TradeRecord) error {
 	}
 
 	if rowsAffected == 0 {
-		return fmt.Errorf("交易记录不存在: symbol=%s, open_time=%s", trade.Symbol, trade.OpenTime.Format("2006-01-02 15:04:05"))
+		return fmt.Errorf("交易记录不存在: symbol=%s, side=%s (未找到未平仓记录)", trade.Symbol, trade.Side)
 	}
 
 	return nil

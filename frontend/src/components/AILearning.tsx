@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import useSWR from 'swr';
 import { useLanguage } from '../contexts/LanguageContext';
 import { t } from '../i18n/translations';
@@ -18,6 +19,11 @@ interface TradeOutcome {
   open_time: string;
   close_time: string;
   was_stop_loss: boolean;
+  entry_logic?: string;        // 进场逻辑
+  exit_logic?: string;         // 出场逻辑（开仓时规划的）
+  close_logic?: string;        // 平仓逻辑（直接平仓的理由）
+  forced_close_logic?: string; // 强制平仓逻辑
+  close_reason?: string;       // 平仓原因（兼容字段）
 }
 
 interface SymbolPerformance {
@@ -49,8 +55,154 @@ interface AILearningProps {
   traderId: string;
 }
 
+// 历史成交逻辑弹窗组件
+function TradeLogicModal({ trade, isOpen, onClose, language }: { 
+  trade: TradeOutcome | null; 
+  isOpen: boolean; 
+  onClose: () => void;
+  language: 'zh' | 'en';
+}) {
+  if (!isOpen || !trade) return null;
+
+  const hasLogic = trade.entry_logic || trade.exit_logic || trade.close_logic || trade.forced_close_logic || trade.close_reason;
+
+  // 确定平仓原因（优先级：close_logic > forced_close_logic > close_reason）
+  const closeReason = trade.close_logic || trade.forced_close_logic || trade.close_reason || '';
+
+  return (
+    <div 
+      className="fixed inset-0 z-50 flex items-center justify-center"
+      style={{ background: 'rgba(0, 0, 0, 0.75)', backdropFilter: 'blur(2px)' }}
+      onClick={onClose}
+    >
+      <div 
+        className="relative rounded-lg p-4 w-full max-w-lg mx-4 max-h-[85vh] overflow-y-auto"
+        style={{ 
+          background: 'linear-gradient(135deg, rgba(20, 25, 35, 0.98) 0%, rgba(30, 35, 45, 0.98) 100%)',
+          border: '1px solid rgba(240, 185, 11, 0.3)',
+          boxShadow: '0 10px 40px rgba(0, 0, 0, 0.6)'
+        }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* 标题栏 */}
+        <div className="flex items-center justify-between mb-4 pb-3 border-b" style={{ borderColor: 'rgba(240, 185, 11, 0.2)' }}>
+          <h3 className="text-base font-bold" style={{ color: '#EAECEF' }}>
+            {trade.symbol} {trade.side === 'long' ? '做多' : '做空'} - 交易逻辑
+          </h3>
+          <button
+            onClick={onClose}
+            className="text-xl font-bold hover:opacity-70 transition-opacity leading-none"
+            style={{ color: '#848E9C' }}
+          >
+            ×
+          </button>
+        </div>
+
+        {/* 逻辑内容 */}
+        <div className="space-y-4">
+          {/* 进场逻辑 */}
+          {trade.entry_logic ? (
+            <div className="p-3 rounded-lg" style={{ background: 'rgba(14, 203, 129, 0.08)', border: '1px solid rgba(14, 203, 129, 0.15)' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-sm font-semibold" style={{ color: '#0ECB81' }}>
+                  📝 进场逻辑
+                </span>
+              </div>
+              <div className="text-xs leading-relaxed" style={{ color: '#CBD5E1', whiteSpace: 'pre-wrap' }}>
+                {trade.entry_logic || '未记录'}
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 rounded-lg" style={{ background: 'rgba(71, 85, 105, 0.1)', border: '1px solid rgba(71, 85, 105, 0.2)' }}>
+              <div className="text-xs" style={{ color: '#94A3B8' }}>
+                ⚠️ 进场逻辑: 未记录
+              </div>
+            </div>
+          )}
+
+          {/* 出场逻辑 */}
+          {trade.exit_logic ? (
+            <div className="p-3 rounded-lg" style={{ background: 'rgba(240, 185, 11, 0.08)', border: '1px solid rgba(240, 185, 11, 0.15)' }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-sm font-semibold" style={{ color: '#F0B90B' }}>
+                  🎯 出场逻辑（开仓时规划）
+                </span>
+              </div>
+              <div className="text-xs leading-relaxed" style={{ color: '#CBD5E1', whiteSpace: 'pre-wrap' }}>
+                {trade.exit_logic || '未规划'}
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 rounded-lg" style={{ background: 'rgba(71, 85, 105, 0.1)', border: '1px solid rgba(71, 85, 105, 0.2)' }}>
+              <div className="text-xs" style={{ color: '#94A3B8' }}>
+                ⚠️ 出场逻辑: 未规划
+              </div>
+            </div>
+          )}
+
+          {/* 平仓原因 */}
+          {closeReason ? (
+            <div className="p-3 rounded-lg" style={{ 
+              background: trade.forced_close_logic 
+                ? 'rgba(246, 70, 93, 0.08)' 
+                : 'rgba(139, 92, 246, 0.08)', 
+              border: trade.forced_close_logic 
+                ? '1px solid rgba(246, 70, 93, 0.15)' 
+                : '1px solid rgba(139, 92, 246, 0.15)' 
+            }}>
+              <div className="flex items-center gap-2 mb-2">
+                <span className="text-sm font-semibold" style={{ 
+                  color: trade.forced_close_logic ? '#F6465D' : '#8B5CF6' 
+                }}>
+                  {trade.forced_close_logic ? '⚠️ 强制平仓原因' : '🔚 平仓原因'}
+                </span>
+              </div>
+              <div className="text-xs leading-relaxed" style={{ color: '#CBD5E1', whiteSpace: 'pre-wrap' }}>
+                {closeReason}
+              </div>
+            </div>
+          ) : (
+            <div className="p-3 rounded-lg" style={{ background: 'rgba(71, 85, 105, 0.1)', border: '1px solid rgba(71, 85, 105, 0.2)' }}>
+              <div className="text-xs" style={{ color: '#94A3B8' }}>
+                ⚠️ 平仓原因: 未记录
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* 关闭按钮 */}
+        <div className="mt-4 pt-3 border-t flex justify-end" style={{ borderColor: 'rgba(240, 185, 11, 0.2)' }}>
+          <button
+            onClick={onClose}
+            className="px-4 py-1.5 rounded text-sm font-semibold transition-colors hover:opacity-80"
+            style={{
+              background: 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)',
+              color: '#1E2026',
+            }}
+          >
+            关闭
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function AILearning({ traderId }: AILearningProps) {
   const { language } = useLanguage();
+  const [selectedTrade, setSelectedTrade] = useState<TradeOutcome | null>(null);
+  const [isModalOpen, setIsModalOpen] = useState(false);
+
+  const handleShowLogic = (trade: TradeOutcome) => {
+    setSelectedTrade(trade);
+    setIsModalOpen(true);
+  };
+
+  const handleCloseModal = () => {
+    setIsModalOpen(false);
+    setSelectedTrade(null);
+  };
+
   const { data: performance, error } = useSWR<PerformanceAnalysis>(
     traderId ? `performance-${traderId}` : 'performance',
     () => api.getPerformance(traderId),
@@ -615,26 +767,44 @@ export default function AILearning({ traderId }: AILearningProps) {
                       )}
                     </div>
 
-                    <div className="text-xs mt-2 pt-2 border-t" style={{
+                    <div className="flex items-center justify-between text-xs mt-2 pt-2 border-t" style={{
                       color: '#64748B',
                       borderColor: 'rgba(71, 85, 105, 0.3)'
                     }}>
-                      {language === 'zh' 
-                        ? new Date(trade.close_time).toLocaleString('zh-CN', {
-                            year: 'numeric',
-                            month: 'long',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit',
-                            hour12: false
-                          })
-                        : new Date(trade.close_time).toLocaleString('en-US', {
-                            month: 'short',
-                            day: '2-digit',
-                            hour: '2-digit',
-                            minute: '2-digit'
-                          })
-                      }
+                      <span>
+                        {language === 'zh' 
+                          ? new Date(trade.close_time).toLocaleString('zh-CN', {
+                              year: 'numeric',
+                              month: 'long',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              hour12: false
+                            })
+                          : new Date(trade.close_time).toLocaleString('en-US', {
+                              month: 'short',
+                              day: '2-digit',
+                              hour: '2-digit',
+                              minute: '2-digit'
+                            })
+                        }
+                      </span>
+                      <button
+                        onClick={() => handleShowLogic(trade)}
+                        className="px-2 py-1 rounded text-xs font-semibold transition-all hover:scale-105"
+                        style={{
+                          background: (trade.entry_logic || trade.exit_logic || trade.close_logic || trade.forced_close_logic || trade.close_reason)
+                            ? 'linear-gradient(135deg, #F0B90B 0%, #FCD535 100%)'
+                            : 'rgba(71, 85, 105, 0.3)',
+                          color: (trade.entry_logic || trade.exit_logic || trade.close_logic || trade.forced_close_logic || trade.close_reason)
+                            ? '#1E2026'
+                            : '#94A3B8',
+                          border: '1px solid rgba(240, 185, 11, 0.3)',
+                          cursor: 'pointer'
+                        }}
+                      >
+                        逻辑
+                      </button>
                     </div>
                   </div>
                 );
@@ -685,6 +855,14 @@ export default function AILearning({ traderId }: AILearningProps) {
           </div>
         </div>
       </div>
+
+      {/* 逻辑弹窗 */}
+      <TradeLogicModal 
+        trade={selectedTrade}
+        isOpen={isModalOpen}
+        onClose={handleCloseModal}
+        language={language}
+      />
     </div>
   );
 }

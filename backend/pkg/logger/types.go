@@ -128,6 +128,10 @@ type TradeOutcome struct {
 	CloseTime     time.Time `json:"close_time"`      // 平仓时间
 	WasStopLoss   bool      `json:"was_stop_loss"`   // 是否止损
 	CloseReason   string    `json:"close_reason"`   // 平仓原因（平仓逻辑）
+	EntryLogic    string    `json:"entry_logic"`    // 进场逻辑
+	ExitLogic     string    `json:"exit_logic"`     // 出场逻辑（开仓时规划的）
+	CloseLogic    string    `json:"close_logic"`    // 平仓逻辑（直接平仓的理由）
+	ForcedCloseLogic string `json:"forced_close_logic"` // 强制平仓逻辑
 }
 
 // PerformanceAnalysis 交易表现分析
