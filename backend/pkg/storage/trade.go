@@ -514,20 +514,23 @@ func (s *TradeStorage) scanTrade(row *sql.Row) (*TradeRecord, error) {
 	var isForced, wasStopLoss, success int
 	var closeTime sql.NullTime
 	var createdAt, updatedAt sql.NullTime
+	// 使用 sql.NullString 处理可能为 NULL 的字段
+	var entryLogic, exitLogic, updateSLLogic, updateTPLogic, closeLogic, forcedCloseLogic sql.NullString
+	var openReason, closeReason, forcedReason, duration, errorMsg sql.NullString
 
 	err := row.Scan(
 		&trade.TradeID, &trade.Symbol, &trade.Side,
 		&trade.OpenTime, &trade.OpenPrice, &trade.OpenQuantity,
-		&trade.OpenLeverage, &trade.OpenOrderID, &trade.OpenReason, &trade.OpenCycleNum,
+		&trade.OpenLeverage, &trade.OpenOrderID, &openReason, &trade.OpenCycleNum,
 		&closeTime, &trade.ClosePrice, &trade.CloseQuantity,
-		&trade.CloseOrderID, &trade.CloseReason, &trade.CloseCycleNum,
-		&isForced, &trade.ForcedReason,
-		&trade.Duration, &trade.PositionValue, &trade.MarginUsed,
+		&trade.CloseOrderID, &closeReason, &trade.CloseCycleNum,
+		&isForced, &forcedReason,
+		&duration, &trade.PositionValue, &trade.MarginUsed,
 		&trade.PnL, &trade.PnLPct,
-		&wasStopLoss, &success, &trade.Error,
-		&trade.EntryLogic, &trade.ExitLogic,
-		&trade.UpdateSLLogic, &trade.UpdateTPLogic,
-		&trade.CloseLogic, &trade.ForcedCloseLogic,
+		&wasStopLoss, &success, &errorMsg,
+		&entryLogic, &exitLogic,
+		&updateSLLogic, &updateTPLogic,
+		&closeLogic, &forcedCloseLogic,
 		&createdAt, &updatedAt,
 	)
 
@@ -535,12 +538,48 @@ func (s *TradeStorage) scanTrade(row *sql.Row) (*TradeRecord, error) {
 		return nil, err
 	}
 
+	// 处理 NULL 值
 	if closeTime.Valid {
 		trade.CloseTime = &closeTime.Time
 	}
 	trade.IsForced = isForced == 1
 	trade.WasStopLoss = wasStopLoss == 1
 	trade.Success = success == 1
+	
+	// 处理可能为 NULL 的字符串字段
+	if openReason.Valid {
+		trade.OpenReason = openReason.String
+	}
+	if closeReason.Valid {
+		trade.CloseReason = closeReason.String
+	}
+	if forcedReason.Valid {
+		trade.ForcedReason = forcedReason.String
+	}
+	if duration.Valid {
+		trade.Duration = duration.String
+	}
+	if errorMsg.Valid {
+		trade.Error = errorMsg.String
+	}
+	if entryLogic.Valid {
+		trade.EntryLogic = entryLogic.String
+	}
+	if exitLogic.Valid {
+		trade.ExitLogic = exitLogic.String
+	}
+	if updateSLLogic.Valid {
+		trade.UpdateSLLogic = updateSLLogic.String
+	}
+	if updateTPLogic.Valid {
+		trade.UpdateTPLogic = updateTPLogic.String
+	}
+	if closeLogic.Valid {
+		trade.CloseLogic = closeLogic.String
+	}
+	if forcedCloseLogic.Valid {
+		trade.ForcedCloseLogic = forcedCloseLogic.String
+	}
 
 	return trade, nil
 }
@@ -551,20 +590,23 @@ func (s *TradeStorage) scanTradeRow(rows *sql.Rows) (*TradeRecord, error) {
 	var isForced, wasStopLoss, success int
 	var closeTime sql.NullTime
 	var createdAt, updatedAt sql.NullTime
+	// 使用 sql.NullString 处理可能为 NULL 的字段
+	var entryLogic, exitLogic, updateSLLogic, updateTPLogic, closeLogic, forcedCloseLogic sql.NullString
+	var openReason, closeReason, forcedReason, duration, errorMsg sql.NullString
 
 	err := rows.Scan(
 		&trade.TradeID, &trade.Symbol, &trade.Side,
 		&trade.OpenTime, &trade.OpenPrice, &trade.OpenQuantity,
-		&trade.OpenLeverage, &trade.OpenOrderID, &trade.OpenReason, &trade.OpenCycleNum,
+		&trade.OpenLeverage, &trade.OpenOrderID, &openReason, &trade.OpenCycleNum,
 		&closeTime, &trade.ClosePrice, &trade.CloseQuantity,
-		&trade.CloseOrderID, &trade.CloseReason, &trade.CloseCycleNum,
-		&isForced, &trade.ForcedReason,
-		&trade.Duration, &trade.PositionValue, &trade.MarginUsed,
+		&trade.CloseOrderID, &closeReason, &trade.CloseCycleNum,
+		&isForced, &forcedReason,
+		&duration, &trade.PositionValue, &trade.MarginUsed,
 		&trade.PnL, &trade.PnLPct,
-		&wasStopLoss, &success, &trade.Error,
-		&trade.EntryLogic, &trade.ExitLogic,
-		&trade.UpdateSLLogic, &trade.UpdateTPLogic,
-		&trade.CloseLogic, &trade.ForcedCloseLogic,
+		&wasStopLoss, &success, &errorMsg,
+		&entryLogic, &exitLogic,
+		&updateSLLogic, &updateTPLogic,
+		&closeLogic, &forcedCloseLogic,
 		&createdAt, &updatedAt,
 	)
 
@@ -572,12 +614,48 @@ func (s *TradeStorage) scanTradeRow(rows *sql.Rows) (*TradeRecord, error) {
 		return nil, err
 	}
 
+	// 处理 NULL 值
 	if closeTime.Valid {
 		trade.CloseTime = &closeTime.Time
 	}
 	trade.IsForced = isForced == 1
 	trade.WasStopLoss = wasStopLoss == 1
 	trade.Success = success == 1
+	
+	// 处理可能为 NULL 的字符串字段
+	if openReason.Valid {
+		trade.OpenReason = openReason.String
+	}
+	if closeReason.Valid {
+		trade.CloseReason = closeReason.String
+	}
+	if forcedReason.Valid {
+		trade.ForcedReason = forcedReason.String
+	}
+	if duration.Valid {
+		trade.Duration = duration.String
+	}
+	if errorMsg.Valid {
+		trade.Error = errorMsg.String
+	}
+	if entryLogic.Valid {
+		trade.EntryLogic = entryLogic.String
+	}
+	if exitLogic.Valid {
+		trade.ExitLogic = exitLogic.String
+	}
+	if updateSLLogic.Valid {
+		trade.UpdateSLLogic = updateSLLogic.String
+	}
+	if updateTPLogic.Valid {
+		trade.UpdateTPLogic = updateTPLogic.String
+	}
+	if closeLogic.Valid {
+		trade.CloseLogic = closeLogic.String
+	}
+	if forcedCloseLogic.Valid {
+		trade.ForcedCloseLogic = forcedCloseLogic.String
+	}
 
 	return trade, nil
 }

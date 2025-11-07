@@ -263,10 +263,17 @@ func (at *AutoTrader) analyzePerformanceFromTrades(trades []*storage.TradeRecord
 			duration = trade.CloseTime.Sub(trade.OpenTime)
 		}
 		
-		// 按照优先级获取平仓逻辑：直接平仓的理由 -> 强制平仓的理由 -> 进场时规划的出场逻辑 -> 默认理由
+		// 按照优先级获取平仓逻辑：
+		// 1. close_logic - 直接平仓理由（AI决策close_long/close_short）
+		// 2. update_sl_logic - 如果平仓是由update_sl挂单成交触发的（was_stop_loss=true且有update_sl_logic）
+		// 3. forced_close_logic - 强制平仓理由
+		// 4. exit_logic - 建仓时记录的出场逻辑
 		closeReason := ""
 		if trade.CloseLogic != "" {
 			closeReason = trade.CloseLogic // 优先使用直接平仓的理由
+		} else if trade.WasStopLoss && trade.UpdateSLLogic != "" {
+			// 如果是由update_sl挂单成交的（was_stop_loss=true且有update_sl_logic），使用update_sl_logic
+			closeReason = trade.UpdateSLLogic
 		} else if trade.ForcedCloseLogic != "" {
 			closeReason = trade.ForcedCloseLogic // 其次是强制平仓的理由
 		} else if trade.ExitLogic != "" {

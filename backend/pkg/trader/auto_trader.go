@@ -603,8 +603,8 @@ func (at *AutoTrader) runCycle() error {
 				if entryPrice == 0 {
 					log.Printf("⚠️  无法获取已平仓 %s 的入场信息，尝试从持仓逻辑获取", posKey)
 					// 尝试从持仓逻辑中获取更多信息，但目前这些结构可能不包含入场价格
-					// 我们可以尝试调用之前实现的同步函数
-					log.Printf("ℹ️  建议运行SyncManualTradesFromExchange()来同步手动交易")
+					// 已禁用：不再从交易所历史恢复交易记录
+					// log.Printf("ℹ️  建议运行SyncManualTradesFromExchange()来同步手动交易")
 					// 清理持仓记录但不记录交易历史
 					at.positionTimeMu.Lock()
 					delete(at.positionFirstSeenTime, posKey)
@@ -3142,8 +3142,39 @@ func (at *AutoTrader) recordTradeHistory(side string, decision *decision.Decisio
 		closeLogic = "未提供平仓逻辑"
 	}
 
+	// 检查是否有update_sl_logic（判断是否由update_sl挂单成交）
+	// 注意：如果平仓是通过AI决策close_long/close_short的，那么不是update_sl挂单成交
+	// update_sl挂单成交是指：通过update_sl设置的止损单，当价格触发止损单时，订单自动成交
+	// 这种情况下，平仓不是通过AI决策，而是止损单自动成交，所以decision.Reasoning应该为空
+	var updateSLLogic string
+	if at.storageAdapter != nil {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			existingTrade, err := tradeStorage.GetOpenTradeByTimeAndSide(decision.Symbol, side, openAction.Timestamp)
+			if err == nil && existingTrade != nil {
+				updateSLLogic = existingTrade.UpdateSLLogic
+			}
+		}
+	}
+	
+	// 判断是否由update_sl挂单成交：
+	// 1. 不是强制平仓（isForced=false）
+	// 2. 有update_sl_logic（说明之前执行过update_sl）
+	// 3. 平仓时没有提供reasoning（说明不是AI主动平仓，而是止损单自动成交）
+	// 注意：如果AI主动平仓（close_long/close_short），即使没有reasoning，也不应该认为是update_sl挂单成交
+	// 但是，如果平仓是通过close_long/close_short决策的，那么decision.Reasoning可能为空（如果AI没有提供）
+	// 所以，更准确的判断是：如果decision.Reasoning为空，且有update_sl_logic，且不是强制平仓，那么可能是update_sl挂单成交
+	// 但实际上，如果平仓是通过close_long/close_short决策的，那么closeLogic应该不为空（会从exit_logic获取）
+	// 所以，如果closeLogic为空（或等于"未提供平仓逻辑"），且有update_sl_logic，那么可能是update_sl挂单成交
+	wasStopLossOrder := !isForced && updateSLLogic != "" && (decision.Reasoning == "" && (closeLogic == "" || closeLogic == "未提供平仓逻辑"))
+	
 	// 构建交易记录用于计算盈亏等信息
 	trade := at.buildTradeRecord(decision.Symbol, side, openAction, closeAction, openCycleNum, atomic.LoadInt64(&at.callCount), isForced, forcedReason, decision.Reasoning, closeLogic)
+	
+	// 如果是由update_sl挂单成交的，设置was_stop_loss=true
+	if wasStopLossOrder {
+		trade.WasStopLoss = true
+	}
 	
 	// 更新交易历史到数据库（使用新的方式：直接更新已存在的交易记录）
 	if at.storageAdapter != nil {
@@ -3165,10 +3196,18 @@ func (at *AutoTrader) recordTradeHistory(side string, decision *decision.Decisio
 				Duration:      trade.Duration,
 				PnL:           trade.PnL,
 				PnLPct:        trade.PnLPct,
-				WasStopLoss:   trade.WasStopLoss,
+				WasStopLoss:   trade.WasStopLoss, // 如果是由update_sl挂单成交的，这里已经是true
 				Success:       trade.Success,
 				Error:         trade.Error,
-				CloseLogic:    closeLogic, // 直接平仓的理由
+			}
+			// 根据是否强制平仓，设置不同的逻辑字段
+			if isForced {
+				// 强制平仓时，只设置 ForcedCloseLogic
+				dbTrade.ForcedCloseLogic = forcedReason
+			} else {
+				// 正常平仓时，只设置 CloseLogic
+				// 注意：如果是由update_sl挂单成交的，closeLogic可能为空，但update_sl_logic已经有值
+				dbTrade.CloseLogic = closeLogic
 			}
 
 			if err := tradeStorage.UpdateTrade(dbTrade); err != nil {
@@ -3218,9 +3257,16 @@ func (at *AutoTrader) recordTradeHistory(side string, decision *decision.Decisio
 						WasStopLoss:    trade.WasStopLoss,
 						Success:        trade.Success,
 						Error:          trade.Error,
-						CloseLogic:     closeLogic,
 						EntryLogic:     entryLogic, // 从数据库获取或为空
 						ExitLogic:      exitLogic,  // 从数据库获取或为空
+					}
+					// 根据是否强制平仓，设置不同的逻辑字段
+					if trade.IsForced {
+						// 强制平仓时，只设置 ForcedCloseLogic
+						dbTradeNew.ForcedCloseLogic = trade.ForcedReason
+					} else {
+						// 正常平仓时，只设置 CloseLogic
+						dbTradeNew.CloseLogic = closeLogic
 					}
 					// 使用CreateOrUpdateTrade，如果记录已存在则更新，不存在则创建
 					if err := tradeStorage.CreateOrUpdateTrade(dbTradeNew); err != nil {
@@ -3457,8 +3503,30 @@ func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeA
 		Success:   true,
 	}
 
+	// 检查是否有update_sl_logic（判断是否由update_sl挂单成交）
+	var updateSLLogic string
+	if at.storageAdapter != nil && hasOpenTime {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			existingTrade, err := tradeStorage.GetOpenTradeByTimeAndSide(symbol, side, openTime)
+			if err == nil && existingTrade != nil {
+				updateSLLogic = existingTrade.UpdateSLLogic
+			}
+		}
+	}
+	
+	// 判断是否由update_sl挂单成交：不是强制平仓，但有update_sl_logic
+	// 注意：如果平仓不是通过close_long/close_short决策的，而是通过其他方式检测到的（比如持仓已经平仓），
+	// 那么如果有update_sl_logic，可能是update_sl挂单成交
+	wasStopLossOrder := !isForced && updateSLLogic != ""
+	
 	// 构建交易记录用于计算盈亏等信息
 	trade := at.buildTradeRecord(symbol, side, openAction, closeAction, 0, atomic.LoadInt64(&at.callCount), isForced, forcedReason, "系统外开仓", "")
+	
+	// 如果是由update_sl挂单成交的，设置was_stop_loss=true
+	if wasStopLossOrder {
+		trade.WasStopLoss = true
+	}
 	
 	// 更新交易历史到数据库（使用新的方式：直接更新已存在的交易记录）
 	if at.storageAdapter != nil {
@@ -3481,7 +3549,7 @@ func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeA
 					Duration:         trade.Duration,
 					PnL:              trade.PnL,
 					PnLPct:           trade.PnLPct,
-					WasStopLoss:      trade.WasStopLoss,
+					WasStopLoss:      trade.WasStopLoss, // 如果是由update_sl挂单成交的，这里已经是true
 					Success:          trade.Success,
 					Error:            trade.Error,
 					ForcedCloseLogic: forcedReason, // 强制平仓逻辑
@@ -4109,6 +4177,8 @@ func deduplicateDecisions(decisions []decision.Decision) []decision.Decision {
 
 // SyncManualTradesFromExchange 同步手工交易到历史记录
 // 这个方法会从交易所获取最近的交易历史，并与本地记录对比，补充缺失的交易记录
+// ⚠️ 已禁用：此功能已禁用，不再从交易所历史恢复交易记录
+// 如需启用，请取消注释 runTradingCycle 中的调用
 func (at *AutoTrader) SyncManualTradesFromExchange() error {
 	log.Println("🔄 开始同步交易所交易历史到本地记录...")
 	
@@ -4516,12 +4586,35 @@ func (at *AutoTrader) SyncManualTradesFromExchange() error {
 				
 				if existingTrade != nil {
 					// 交易记录已存在，说明是系统内开仓的，应该更新平仓信息
-					// 获取平仓逻辑：优先使用已保存的exit_logic
+					// 检查是否已经平仓（如果已经平仓，不需要更新）
+					if existingTrade.CloseTime != nil {
+						log.Printf("ℹ️  交易记录已存在且已平仓，跳过更新: %s %s (平仓时间: %s)", 
+							agg.symbol, agg.tradeSide, existingTrade.CloseTime.Format("2006-01-02 15:04:05"))
+						continue
+					}
+					
+					// 检查是否有update_sl_logic（判断是否由update_sl挂单成交）
+					// 如果从交易所同步的平仓记录，且本地记录有update_sl_logic但没有close_logic，
+					// 那么可能是由update_sl挂单成交的
+					wasStopLossOrder := existingTrade.UpdateSLLogic != "" && existingTrade.CloseLogic == ""
+					
+					// 获取平仓逻辑：按照优先级
+					// 1. 如果有update_sl_logic且是由update_sl挂单成交的，使用update_sl_logic
+					// 2. 否则使用exit_logic
+					// 3. 如果都没有，使用默认值
 					closeReason := ""
-					if existingTrade.ExitLogic != "" {
+					closeLogic := ""
+					if wasStopLossOrder {
+						// 如果是由update_sl挂单成交的，使用update_sl_logic作为平仓逻辑
+						closeReason = existingTrade.UpdateSLLogic
+						closeLogic = existingTrade.UpdateSLLogic
+					} else if existingTrade.ExitLogic != "" {
+						// 否则使用exit_logic
 						closeReason = existingTrade.ExitLogic
+						closeLogic = existingTrade.ExitLogic
 					} else {
 						closeReason = "手动平仓"
+						closeLogic = "手动平仓"
 					}
 					
 					// 使用找到的记录的OpenTime（确保匹配数据库中的精确时间）
@@ -4542,10 +4635,17 @@ func (at *AutoTrader) SyncManualTradesFromExchange() error {
 						Duration:       duration.String(),
 						PnL:            calculatedPnL,
 						PnLPct:         pnlPct,
-						WasStopLoss:    false,
+						WasStopLoss:    wasStopLossOrder, // 如果是由update_sl挂单成交的，设置为true
 						Success:        true,
 						Error:          "",
-						CloseLogic:     closeReason, // 使用exit_logic作为close_logic
+					}
+					// 根据是否由update_sl挂单成交，设置不同的逻辑字段
+					if wasStopLossOrder {
+						// 如果是由update_sl挂单成交的，不设置close_logic（因为会使用update_sl_logic）
+						// update_sl_logic已经在数据库中，不需要更新
+					} else {
+						// 否则设置close_logic
+						updateTrade.CloseLogic = closeLogic
 					}
 					
 					if err := tradeStorage.UpdateTrade(updateTrade); err != nil {
@@ -4591,6 +4691,9 @@ func (at *AutoTrader) SyncManualTradesFromExchange() error {
 			WasStopLoss:    false,
 			Success:        true,
 			Error:          "",
+			EntryLogic:     "系统外开仓", // 标记为系统外开仓
+			ExitLogic:      "",           // 系统外开仓没有计划平仓逻辑
+			CloseLogic:     closeReason,  // 设置平仓逻辑
 		}
 		
 		missingTrades = append(missingTrades, tradeRecord)

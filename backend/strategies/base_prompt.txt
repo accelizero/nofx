@@ -93,7 +93,7 @@
     * **3c. 风险与仓位计算 (账户百分比模型)**
       * *(仅在 3b 批准后执行)*
       * *1. 内嵌规则*: 
-        * `max_risk_percent = 10%` (即 0.02)
+        * `max_risk_percent = 2%` (即 0.02)
         * `leverage = 20`
       * *2. 获取数据*:
         * `account_balance` (例如: 157.65 USD)

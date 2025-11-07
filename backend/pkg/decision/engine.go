@@ -631,10 +631,13 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 						}
 						closeTimeStr := trade.CloseTime.Format("2006-01-02 15:04:05")
 						
-						// 平仓逻辑（如果有）
+						// 平仓逻辑（使用CloseReason，已在performance_analysis.go中按优先级填充）
 						closeLogic := ""
 						if trade.CloseReason != "" {
 							closeLogic = fmt.Sprintf(" | 平仓逻辑: %s", trade.CloseReason)
+						} else {
+							// 如果CloseReason为空，显示默认值（虽然理论上不应该为空）
+							closeLogic = " | 平仓逻辑: 未提供平仓逻辑"
 						}
 						
 						sb.WriteString(fmt.Sprintf("%d. **%s** %s | 开仓: %.2f → 平仓: %.2f | 盈亏: %s%.2f USDT (%.2f%%) | 杠杆: %dx | 时长: %s | 平仓时间: %s%s%s\n",
@@ -721,10 +724,13 @@ func buildMultiTimeframePrompt(ctx *Context, mcpClient *mcp.Client) (string, err
 								}
 								closeTimeStr := trade.CloseTime.Format("2006-01-02 15:04:05")
 								
-								// 平仓逻辑（如果有）
+								// 平仓逻辑（使用CloseReason，已在performance_analysis.go中按优先级填充）
 								closeLogic := ""
 								if trade.CloseReason != "" {
 									closeLogic = fmt.Sprintf(" | 平仓逻辑: %s", trade.CloseReason)
+								} else {
+									// 如果CloseReason为空，显示默认值（虽然理论上不应该为空）
+									closeLogic = " | 平仓逻辑: 未提供平仓逻辑"
 								}
 								
 								sb.WriteString(fmt.Sprintf("%d. **%s** %s | 开仓: %.2f → 平仓: %.2f | 盈亏: %s%.2f USDT (%.2f%%) | 杠杆: %dx | 时长: %s | 平仓时间: %s%s%s\n",
