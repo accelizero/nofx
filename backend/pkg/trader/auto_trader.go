@@ -3327,20 +3327,57 @@ func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeA
 
 	// 获取当前持仓信息（平仓后可能已经不存在，尝试从决策记录中获取）
 	var entryPrice, quantity, leverage float64
-	positions, err := at.trader.GetPositions()
-	if err == nil {
-		for _, pos := range positions {
-			if pos["symbol"].(string) == symbol && pos["side"].(string) == side {
-				entryPrice = pos["entryPrice"].(float64)
-				qty := pos["positionAmt"].(float64)
-				if qty < 0 {
-					qty = -qty
+	
+	// 优先从数据库获取开仓价格（最准确）
+	if at.storageAdapter != nil {
+		tradeStorage := at.storageAdapter.GetTradeStorage()
+		if tradeStorage != nil {
+			// 先尝试查找未平仓交易（即使已经平仓，如果记录还没更新，可能还能找到）
+			trade, err := tradeStorage.GetOpenTrade(symbol, side)
+			if err == nil && trade != nil {
+				entryPrice = trade.OpenPrice
+				quantity = trade.OpenQuantity
+				leverage = float64(trade.OpenLeverage)
+				log.Printf("ℹ️  从数据库获取到 %s %s 的开仓价格: %.2f, 数量: %.4f, 杠杆: %.0fx", 
+					symbol, side, entryPrice, quantity, leverage)
+			} else {
+				// 如果未平仓交易找不到，尝试查找最近已平仓的交易（可能刚被更新）
+				localTrades, err := tradeStorage.GetTradesBySymbol(symbol, 1)
+				if err == nil {
+					for _, t := range localTrades {
+						if t.Side == side {
+							entryPrice = t.OpenPrice
+							quantity = t.OpenQuantity
+							leverage = float64(t.OpenLeverage)
+							log.Printf("ℹ️  从数据库（已平仓记录）获取到 %s %s 的开仓价格: %.2f, 数量: %.4f, 杠杆: %.0fx", 
+								symbol, side, entryPrice, quantity, leverage)
+							break
+						}
+					}
 				}
-				quantity = qty
-				if lev, ok := pos["leverage"].(float64); ok {
-					leverage = lev
+			}
+		}
+	}
+	
+	// 如果数据库中没有找到，尝试从当前持仓信息获取
+	if entryPrice == 0 {
+		positions, err := at.trader.GetPositions()
+		if err == nil {
+			for _, pos := range positions {
+				if pos["symbol"].(string) == symbol && pos["side"].(string) == side {
+					entryPrice = pos["entryPrice"].(float64)
+					qty := pos["positionAmt"].(float64)
+					if qty < 0 {
+						qty = -qty
+					}
+					quantity = qty
+					if lev, ok := pos["leverage"].(float64); ok {
+						leverage = lev
+					}
+					log.Printf("ℹ️  从持仓信息获取到 %s %s 的开仓价格: %.2f, 数量: %.4f, 杠杆: %.0fx", 
+						symbol, side, entryPrice, quantity, leverage)
+					break
 				}
-				break
 			}
 		}
 	}
@@ -3404,18 +3441,12 @@ func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeA
 								isOpenShort := d.Action == "open_short" && d.Symbol == symbol && side == "short"
 								
 								if isOpenLong || isOpenShort {
-									// 这是一个匹配的开仓决策，记录开仓价格和数量
-									entryPrice = closeAction.Price // 使用closeAction中的价格作为初始估算（强制平仓时这可能是接近的价格）
-									
-									// 决策结构中没有EntryPrice字段，但我们有PositionSizeUSD
-									// 我们无法直接获得入场价格，但可以尝试其他方法
-									if d.PositionSizeUSD > 0 {
-										log.Printf("⚠️  找到开仓决策但无法获取入场价格，使用估算值")
-									} else {
-										log.Printf("⚠️  找到开仓决策但缺少完整信息，使用估算值")
-										entryPrice = closeAction.Price
-										quantity = closeAction.Quantity
-										leverage = float64(closeAction.Leverage)
+									// 这是一个匹配的开仓决策
+									// ⚠️ 注意：决策结构中没有EntryPrice字段，不能使用closeAction.Price作为开仓价格
+									// 如果此时entryPrice还是0，说明前面所有方法都失败了，这是一个fallback情况
+									if entryPrice == 0 {
+										log.Printf("⚠️  找到开仓决策但无法获取入场价格，所有方法都失败，无法准确计算盈亏")
+										// 不设置entryPrice，让后续代码处理（会跳过记录）
 									}
 									
 									// 如果还没有开仓时间，使用这个记录的时间戳
@@ -3513,6 +3544,23 @@ func (at *AutoTrader) recordTradeHistoryFromPosition(side, symbol string, closeA
 	
 	// 构建交易记录用于计算盈亏等信息
 	trade := at.buildTradeRecord(symbol, side, openAction, closeAction, 0, atomic.LoadInt64(&at.callCount), isForced, forcedReason, "系统外开仓", "")
+	
+	// 如果是强制平仓，尝试从交易所获取准确的realizedPnl（已扣除手续费）
+	if isForced && closeAction.OrderID > 0 {
+		realizedPnl, err := at.getRealizedPnlFromExchange(symbol, closeAction.OrderID, closeAction.Timestamp)
+		if err == nil && realizedPnl != 0 {
+			// 使用交易所返回的realizedPnl（已扣除手续费）
+			trade.PnL = realizedPnl
+			// 重新计算盈亏百分比
+			if trade.MarginUsed > 0 {
+				trade.PnLPct = (realizedPnl / trade.MarginUsed) * 100
+			}
+			log.Printf("ℹ️  从交易所获取到 %s %s 的已实现盈亏（已扣除手续费）: %.2f USDT (%.2f%%)", 
+				symbol, side, realizedPnl, trade.PnLPct)
+		} else if err != nil {
+			log.Printf("⚠️  无法从交易所获取 %s %s 的已实现盈亏: %v，使用手动计算的盈亏", symbol, side, err)
+		}
+	}
 	
 	// 如果是由update_sl挂单成交的，设置was_stop_loss=true
 	if wasStopLossOrder {
@@ -4863,4 +4911,56 @@ func (at *AutoTrader) getLatestClosePrice(symbol, side string) (float64, error) 
 	}
 	
 	return latestTrade.price, nil
+}
+
+// getRealizedPnlFromExchange 从交易所获取订单的已实现盈亏（已扣除手续费）
+func (at *AutoTrader) getRealizedPnlFromExchange(symbol string, orderID int64, closeTime time.Time) (float64, error) {
+	// 检查trader是否支持GetAccountTrades方法
+	asterTrader, ok := at.trader.(*AsterTrader)
+	if !ok {
+		return 0, fmt.Errorf("当前交易器不支持获取交易历史功能")
+	}
+	
+	// 等待一小段时间，确保订单已处理完成
+	time.Sleep(2 * time.Second)
+	
+	// 获取平仓时间前后5分钟的交易历史（确保能获取到该订单）
+	startTime := closeTime.Add(-5 * time.Minute)
+	endTime := closeTime.Add(5 * time.Minute)
+	
+	accountTrades, err := asterTrader.GetAccountTrades(symbol, startTime, endTime, 100)
+	if err != nil {
+		return 0, fmt.Errorf("获取交易所交易历史失败: %w", err)
+	}
+	
+	// 查找匹配的订单
+	var totalRealizedPnl float64
+	found := false
+	for _, trade := range accountTrades {
+		// 检查订单ID
+		var tradeOrderID int64
+		if id, ok := trade["orderId"].(float64); ok {
+			tradeOrderID = int64(id)
+		} else if id, ok := trade["orderId"].(string); ok {
+			if parsed, err := strconv.ParseInt(id, 10, 64); err == nil {
+				tradeOrderID = parsed
+			}
+		}
+		
+		if tradeOrderID == orderID {
+			// 解析realizedPnl
+			realizedPnlStr, _ := trade["realizedPnl"].(string)
+			realizedPnl, _ := strconv.ParseFloat(realizedPnlStr, 64)
+			if realizedPnl != 0 {
+				totalRealizedPnl += realizedPnl
+				found = true
+			}
+		}
+	}
+	
+	if !found {
+		return 0, fmt.Errorf("未找到订单ID %d 的交易记录", orderID)
+	}
+	
+	return totalRealizedPnl, nil
 }
